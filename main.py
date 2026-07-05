@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""师助AI - PPT生成 API (部署到 Railway)"""
+"""师助AI - PPT生成 API v2 (支持幻灯片图片预览)"""
 import os, json, io, base64, http.server
 from pptx import Presentation
 from pptx.util import Inches, Pt
@@ -28,8 +28,10 @@ def detect(t):
     if '总结' in s or '计划' in s or '规划' in s: return 'plan'
     return 'default'
 
-def gen(data):
-    th = THEME.get(detect(data.get('title','')), THEME['default'])
+def gen_pptx(data):
+    """生成完整 PPTX，返回二进制"""
+    th_name = detect(data.get('title',''))
+    th = THEME.get(th_name, THEME['default'])
     D = rgb(th[0]); P = rgb(th[1]); A = rgb(th[2]); L = rgb(th[3])
     W = RGBColor(0xFF,0xFF,0xFF); T = RGBColor(0x33,0x33,0x33)
     prs = Presentation(); prs.slide_width = Inches(13.333); prs.slide_height = Inches(7.5)
@@ -101,11 +103,46 @@ def gen(data):
                 p3.font.size = Pt(20); p3.font.bold = True; p3.font.color.rgb = W; p3.alignment = PP_ALIGN.CENTER
                 tb3 = slide.shapes.add_textbox(Inches(2.0), Inches(y+0.05), Inches(10), Inches(0.6))
                 p4 = tb3.text_frame.paragraphs[0]; p4.text = item; p4.font.size = Pt(18); p4.font.color.rgb = T
-
     buf = io.BytesIO()
     prs.save(buf)
     return buf.getvalue()
 
+
+
+def gen_docx(data):
+    """生成Word文档，返回二进制"""
+    from docx import Document
+    from docx.shared import Pt, Inches, Cm, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    
+    doc = Document()
+    style = doc.styles['Normal']
+    font = style.font; font.name = 'Microsoft YaHei'; font.size = Pt(12)
+    style.element.rPr.rFonts.set('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}eastAsia', 'Microsoft YaHei')
+    
+    title = data.get('title', '文档')
+    p = doc.add_heading(title, level=0)
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    content = data.get('content', '')
+    for para in content.splitlines():
+        para = para.strip()
+        if not para: continue
+        if para.startswith('# '):
+            doc.add_heading(para[2:], level=1)
+        elif para.startswith('## '):
+            doc.add_heading(para[3:], level=2)
+        elif para.startswith('**') and para.endswith('**'):
+            p = doc.add_paragraph()
+            run = p.add_run(para[2:-2])
+            run.bold = True; run.font.size = Pt(14)
+        else:
+            p = doc.add_paragraph(para)
+            p.paragraph_format.space_after = Pt(6)
+    
+    buf = __import__('io').BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
 class Handler(http.server.BaseHTTPRequestHandler):
     def _cors(self):
         self.send_header('Access-Control-Allow-Origin', '*')
@@ -123,14 +160,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(b'szhu-ai PPT API running')
 
     def do_POST(self):
-        if self.path != '/gen':
+        if self.path not in ('/gen', '/preview', '/gendoc'):
             self.send_response(404); self.end_headers(); return
         try:
             length = int(self.headers.get('Content-Length', 0))
             body = json.loads(self.rfile.read(length))
-            pptx_bytes = gen(body)
-            b64 = base64.b64encode(pptx_bytes).decode('ascii')
-            resp = json.dumps({'code': 0, 'data': b64, 'file': f"szhuAI_{body.get('title','PPT')}.pptx"})
+
+            if self.path == '/gen':
+                pptx_bytes = gen_pptx(body)
+                b64 = base64.b64encode(pptx_bytes).decode('ascii')
+                resp = json.dumps({'code': 0, 'data': b64, 'file': f"szhuAI_{body.get('title','PPT')}.pptx"})
+            else:  # /preview
+                pptx_bytes = gen_pptx(body)
+                b64_pptx = base64.b64encode(pptx_bytes).decode('ascii')
+                # 返回布局元数据，让小程序匹配预览样式
+                slides = body.get('slides', [])
+                n = len(slides)
+                layouts = []
+                for idx in range(n):
+                    if idx == 0: lt = 'cover'
+                    elif idx == n-1: lt = 'quote'
+                    elif (idx-1) % 4 == 0: lt = 'section'
+                    elif (idx-1) % 4 == 1: lt = 'card'
+                    elif (idx-1) % 4 == 2: lt = 'banner'
+                    else: lt = 'darklist'
+                    layouts.append(lt)
+                resp = json.dumps({
+                    'code': 0, 'pptx': b64_pptx,
+                    'layouts': layouts,
+                    'theme': detect(body.get('title','')),
+                    'file': f"szhuAI_{body.get('title','PPT')}.pptx"
+                })
+
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self._cors(); self.end_headers()
@@ -140,6 +201,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self._cors(); self.end_headers()
             self.wfile.write(json.dumps({'code': -1, 'error': str(e)}).encode())
+
+    def log_message(self, fmt, *args):
+        print(f'[PPT API] {args[0] if args else fmt}')
 
 if __name__ == '__main__':
     PORT = int(os.environ.get('PORT', 8080))
