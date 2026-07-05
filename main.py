@@ -110,14 +110,15 @@ def gen_pptx(data):
 
 
 def gen_docx(data):
-    """生成Word文档，返回二进制"""
+    """生成Word文档(python-docx)"""
     from docx import Document
-    from docx.shared import Pt, Inches, Cm, RGBColor
+    from docx.shared import Pt
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     
     doc = Document()
     style = doc.styles['Normal']
-    font = style.font; font.name = 'Microsoft YaHei'; font.size = Pt(12)
+    style.font.name = 'Microsoft YaHei'
+    style.font.size = Pt(12)
     style.element.rPr.rFonts.set('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}eastAsia', 'Microsoft YaHei')
     
     title = data.get('title', '文档')
@@ -125,20 +126,26 @@ def gen_docx(data):
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
     content = data.get('content', '')
-    for para in content.splitlines():
-        para = para.strip()
-        if not para: continue
-        if para.startswith('# '):
-            doc.add_heading(para[2:], level=1)
-        elif para.startswith('## '):
-            doc.add_heading(para[3:], level=2)
-        elif para.startswith('**') and para.endswith('**'):
-            p = doc.add_paragraph()
-            run = p.add_run(para[2:-2])
-            run.bold = True; run.font.size = Pt(14)
-        else:
-            p = doc.add_paragraph(para)
-            p.paragraph_format.space_after = Pt(6)
+    if content:
+        for para in content.split('\n'):
+            para = para.strip()
+            if not para: continue
+            try:
+                if para.startswith('# ') or para.startswith('## '):
+                    level = 1 if para.startswith('# ') else 2
+                    doc.add_heading(para[level+2:], level=level)
+                elif para.startswith('**') and para.endswith('**'):
+                    d = doc.add_paragraph()
+                    r = d.add_run(para[2:-2])
+                    r.bold = True; r.font.size = Pt(14)
+                elif para.startswith('- ') or para.startswith('* '):
+                    doc.add_paragraph(para[2:], style='List Bullet')
+                else:
+                    dp = doc.add_paragraph(para)
+                    dp.paragraph_format.space_after = Pt(6)
+            except:
+                dp = doc.add_paragraph(para)
+                dp.paragraph_format.space_after = Pt(6)
     
     buf = __import__('io').BytesIO()
     doc.save(buf)
@@ -170,6 +177,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 pptx_bytes = gen_pptx(body)
                 b64 = base64.b64encode(pptx_bytes).decode('ascii')
                 resp = json.dumps({'code': 0, 'data': b64, 'file': f"szhuAI_{body.get('title','PPT')}.pptx"})
+            elif self.path == '/gendoc':
+                t = body.get('title',''); cl = len(body.get('content',''))
+                print(f'gendoc: title={t}, content_len={cl}')
+                docx_bytes = gen_docx(body)
+                print(f'gendoc: generated {len(docx_bytes)} bytes')
+                b64 = base64.b64encode(docx_bytes).decode('ascii')
+                resp = json.dumps({'code': 0, 'data': b64, 'file': f"师助AI_{t}.docx"})
             else:  # /preview
                 pptx_bytes = gen_pptx(body)
                 b64_pptx = base64.b64encode(pptx_bytes).decode('ascii')
