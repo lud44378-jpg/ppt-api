@@ -129,14 +129,15 @@ def gen_docx(data):
     doc_title = data.get('docTitle', '') or title
     doc_subtitle = data.get('docSubtitle', '')
     
-    # 大标题：小二 居中 加粗
-    p = doc.add_heading(doc_title, level=0)
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    for run in p.runs:
-        run.font.name = 'SimSun'
-        run.element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
-        run.font.size = Pt(18)
-        run.font.bold = True
+    # 大标题：小二 居中 加粗（纯文本，无蓝色主题）
+    tp = doc.add_paragraph()
+    tp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    tr = tp.add_run(doc_title)
+    tr.bold = True
+    tr.font.size = Pt(18)
+    tr.font.name = 'SimSun'
+    tr.font.color.rgb = None
+    tr.element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
     
     if doc_subtitle:
         sp = doc.add_paragraph()
@@ -183,8 +184,14 @@ def gen_docx(data):
                     continue
                 
                 if para.startswith('# ') or para.startswith('## '):
-                    level = 1 if para.startswith('# ') else 2
-                    h = doc.add_heading(para[level+2:], level=level)
+                    hp = doc.add_paragraph()
+                    hp.paragraph_format.line_spacing = 1.3
+                    hr = hp.add_run(para[para.index(' ')+1:])
+                    hr.bold = True
+                    hr.font.size = Pt(15)
+                    hr.font.name = 'SimSun'
+                    hr.font.color.rgb = None
+                    hr.element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
                 elif para.startswith('**') and para.endswith('**'):
                     d = doc.add_paragraph()
                     d.paragraph_format.line_spacing = 1.3
