@@ -106,6 +106,64 @@ def gen(data):
     prs.save(buf)
     return buf.getvalue()
 
+
+def gen_docx(data):
+    """生成Word文档(python-docx)"""
+    from docx import Document
+    from docx.shared import Pt, Cm
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.ns import qn
+    
+    doc = Document()
+    style = doc.styles['Normal']
+    style.font.name = 'Microsoft YaHei'
+    style.font.size = Pt(12)
+    style.element.rPr.rFonts.set(qn('w:eastAsia'), 'Microsoft YaHei')
+    
+    title = data.get('title', '文档')
+    doc_title = data.get('docTitle', '') or title
+    doc_subtitle = data.get('docSubtitle', '')
+    p = doc.add_heading(doc_title, level=0)
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    if doc_subtitle:
+        sp = doc.add_paragraph()
+        sr = sp.add_run(doc_subtitle)
+        sr.bold = True
+        sr.font.size = Pt(16)
+        sr.font.name = 'Microsoft YaHei'
+        sp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    content = data.get('content', '')
+    if content:
+        for para in content.split('\n'):
+            para = para.strip()
+            if not para:
+                continue
+            try:
+                if para.startswith('# ') or para.startswith('## '):
+                    level = 1 if para.startswith('# ') else 2
+                    doc.add_heading(para[level+2:], level=level)
+                elif para.startswith('**') and para.endswith('**'):
+                    d = doc.add_paragraph()
+                    r = d.add_run(para[2:-2])
+                    r.bold = True
+                    r.font.size = Pt(14)
+                elif para.startswith('- ') or para.startswith('* '):
+                    doc.add_paragraph(para[2:], style='List Bullet')
+                else:
+                    dp = doc.add_paragraph(para)
+                    dp.paragraph_format.space_after = Pt(6)
+                    # first-line indent for Chinese paragraphs
+                    pf = dp.paragraph_format
+                    pf.first_line_indent = Cm(0.74)
+            except Exception:
+                dp = doc.add_paragraph(para)
+                dp.paragraph_format.space_after = Pt(6)
+    
+    buf = __import__('io').BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
 # === HTTP Server ===
 def make_handler():
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -127,23 +185,32 @@ def make_handler():
             self.wfile.write(b'师助AI PPT API is running. POST JSON to /gen')
 
         def do_POST(self):
-            if self.path != '/gen':
+            if self.path not in ('/gen', '/gendoc'):
                 self.send_response(404)
                 self.end_headers()
                 return
             try:
                 length = int(self.headers.get('Content-Length', 0))
                 body = json.loads(self.rfile.read(length))
-                print(f'Generating PPT: {body.get("title","")}')
-                pptx_bytes = gen(body)
-                b64 = base64.b64encode(pptx_bytes).decode('ascii')
-                resp = json.dumps({'code': 0, 'data': b64, 'file': f"师助AI_{body.get('title','PPT')}.pptx"})
+                
+                if self.path == '/gendoc':
+                    print(f'Generating DOC: {body.get("title","")}')
+                    docx_bytes = gen_docx(body)
+                    b64 = base64.b64encode(docx_bytes).decode('ascii')
+                    resp = json.dumps({'code': 0, 'data': b64, 'file': f"师助AI_{body.get('title','')}.docx"})
+                    print(f'Done: {len(docx_bytes)} bytes')
+                else:
+                    print(f'Generating PPT: {body.get("title","")}')
+                    pptx_bytes = gen(body)
+                    b64 = base64.b64encode(pptx_bytes).decode('ascii')
+                    resp = json.dumps({'code': 0, 'data': b64, 'file': f"师助AI_{body.get('title','PPT')}.pptx"})
+                    print(f'Done: {len(pptx_bytes)} bytes')
+                
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self._set_cors()
                 self.end_headers()
                 self.wfile.write(resp.encode())
-                print(f'Done: {len(pptx_bytes)} bytes')
             except Exception as e:
                 self.send_response(500)
                 self.send_header('Content-Type', 'application/json')
