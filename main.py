@@ -122,8 +122,17 @@ def gen_docx(data):
     style.element.rPr.rFonts.set('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}eastAsia', 'Microsoft YaHei')
     
     title = data.get('title', '文档')
-    p = doc.add_heading(title, level=0)
+    doc_title = data.get('docTitle', '') or title
+    doc_subtitle = data.get('docSubtitle', '')
+    p = doc.add_heading(doc_title, level=0)
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    if doc_subtitle:
+        sp = doc.add_paragraph()
+        sr = sp.add_run(doc_subtitle)
+        sr.bold = True
+        sr.font.size = Pt(16)
+        sr.font.name = 'Microsoft YaHei'
+        sp.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
     content = data.get('content', '')
     if content:
