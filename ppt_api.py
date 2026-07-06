@@ -178,7 +178,7 @@ def gen_docx(data):
                     sr.element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
                     if para:
                         dp = doc.add_paragraph(para)
-                        dp.paragraph_format.first_line_indent = Cm(0.74)
+                        dp.paragraph_format.first_line_indent = Pt(24)
                         dp.paragraph_format.line_spacing = 1.3
                         dp.paragraph_format.space_after = Pt(6)
                     continue
@@ -205,7 +205,7 @@ def gen_docx(data):
                     li.paragraph_format.line_spacing = 1.3
                 else:
                     dp = doc.add_paragraph(para)
-                    dp.paragraph_format.first_line_indent = Cm(0.74)
+                    dp.paragraph_format.first_line_indent = Pt(24)
                     dp.paragraph_format.line_spacing = 1.3
                     dp.paragraph_format.space_after = Pt(6)
             except Exception:
