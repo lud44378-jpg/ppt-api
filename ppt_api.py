@@ -108,61 +108,108 @@ def gen(data):
 
 
 def gen_docx(data):
-    """生成Word文档(python-docx)"""
+    """生成Word文档(python-docx)，带【】小标题识别、字体、字号、缩进"""
     from docx import Document
-    from docx.shared import Pt, Cm
+    from docx.shared import Pt, Cm, Emu
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
     
     doc = Document()
+    
+    # 默认样式：宋体 小四 1.3倍行距
     style = doc.styles['Normal']
-    style.font.name = 'Microsoft YaHei'
+    style.font.name = 'SimSun'
     style.font.size = Pt(12)
-    style.element.rPr.rFonts.set(qn('w:eastAsia'), 'Microsoft YaHei')
+    style.element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
+    pf = style.paragraph_format
+    pf.line_spacing = 1.3
     
     title = data.get('title', '文档')
     doc_title = data.get('docTitle', '') or title
     doc_subtitle = data.get('docSubtitle', '')
+    
+    # 大标题：小二 居中 加粗
     p = doc.add_heading(doc_title, level=0)
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for run in p.runs:
+        run.font.name = 'SimSun'
+        run.element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
+        run.font.size = Pt(18)
+        run.font.bold = True
+    
     if doc_subtitle:
         sp = doc.add_paragraph()
+        sp.alignment = WD_ALIGN_PARAGRAPH.CENTER
         sr = sp.add_run(doc_subtitle)
         sr.bold = True
-        sr.font.size = Pt(16)
-        sr.font.name = 'Microsoft YaHei'
-        sp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        sr.font.size = Pt(14)
+        sr.font.name = 'SimSun'
+        sr.element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
     
     content = data.get('content', '')
+    subtitle_counter = 0
+    
     if content:
         for para in content.split('\n'):
             para = para.strip()
             if not para:
                 continue
             try:
+                # 【小标题】：加粗大号、自动编号、不缩进
+                import re
+                bracket_match = re.search(r'【(.+?)】', para)
+                if bracket_match:
+                    sub_text = bracket_match.group(1)
+                    subtitle_counter += 1
+                    if not re.match(r'^[一二三四五六七八九十\d]', sub_text):
+                        sub_text = str(subtitle_counter) + '. ' + sub_text
+                    # 去掉【】部分
+                    para = re.sub(r'【.+?】', '', para).strip()
+                    sp = doc.add_paragraph()
+                    sp.paragraph_format.space_before = Pt(12)
+                    sp.paragraph_format.space_after = Pt(6)
+                    sp.paragraph_format.line_spacing = 1.3
+                    sr = sp.add_run(sub_text)
+                    sr.bold = True
+                    sr.font.size = Pt(15)
+                    sr.font.name = 'SimSun'
+                    sr.element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
+                    if para:
+                        dp = doc.add_paragraph(para)
+                        dp.paragraph_format.first_line_indent = Cm(0.74)
+                        dp.paragraph_format.line_spacing = 1.3
+                        dp.paragraph_format.space_after = Pt(6)
+                    continue
+                
                 if para.startswith('# ') or para.startswith('## '):
                     level = 1 if para.startswith('# ') else 2
-                    doc.add_heading(para[level+2:], level=level)
+                    h = doc.add_heading(para[level+2:], level=level)
                 elif para.startswith('**') and para.endswith('**'):
                     d = doc.add_paragraph()
+                    d.paragraph_format.line_spacing = 1.3
                     r = d.add_run(para[2:-2])
                     r.bold = True
-                    r.font.size = Pt(14)
+                    r.font.size = Pt(12)
+                    r.font.name = 'SimSun'
+                    r.element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
                 elif para.startswith('- ') or para.startswith('* '):
-                    doc.add_paragraph(para[2:], style='List Bullet')
+                    li = doc.add_paragraph(para[2:], style='List Bullet')
+                    li.paragraph_format.line_spacing = 1.3
                 else:
                     dp = doc.add_paragraph(para)
+                    dp.paragraph_format.first_line_indent = Cm(0.74)
+                    dp.paragraph_format.line_spacing = 1.3
                     dp.paragraph_format.space_after = Pt(6)
-                    # first-line indent for Chinese paragraphs
-                    pf = dp.paragraph_format
-                    pf.first_line_indent = Cm(0.74)
             except Exception:
                 dp = doc.add_paragraph(para)
+                dp.paragraph_format.line_spacing = 1.3
                 dp.paragraph_format.space_after = Pt(6)
     
     buf = __import__('io').BytesIO()
     doc.save(buf)
     return buf.getvalue()
+
 
 # === HTTP Server ===
 def make_handler():
