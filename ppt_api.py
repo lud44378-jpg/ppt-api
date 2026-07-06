@@ -182,7 +182,7 @@ def make_handler():
             self.send_header('Content-Type', 'text/plain')
             self._set_cors()
             self.end_headers()
-            self.wfile.write(b'师助AI PPT API is running. POST JSON to /gen')
+            self.wfile.write(('师助AI PPT API is running. POST JSON to /gen').encode())
 
         def do_POST(self):
             if self.path not in ('/gen', '/gendoc'):
@@ -193,7 +193,9 @@ def make_handler():
                 length = int(self.headers.get('Content-Length', 0))
                 body = json.loads(self.rfile.read(length))
                 
+                print(f'[DEBUG] self.path = {repr(self.path)}, allowed_paths = /gen /gendoc')
                 if self.path == '/gendoc':
+                    print(f'[DEBUG] Entering /gendoc branch')
                     print(f'Generating DOC: {body.get("title","")}')
                     docx_bytes = gen_docx(body)
                     b64 = base64.b64encode(docx_bytes).decode('ascii')
@@ -210,6 +212,8 @@ def make_handler():
                 self.send_header('Content-Type', 'application/json')
                 self._set_cors()
                 self.end_headers()
+                print(f'[DEBUG] Response keys: {list(json.loads(resp).keys())}')
+                print('[DEBUG] Response keys:', list(resp_dict.keys()))
                 self.wfile.write(resp.encode())
             except Exception as e:
                 self.send_response(500)
