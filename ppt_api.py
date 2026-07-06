@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """师助AI - PPT生成 API (部署到 Railway / Render)"""
-import os, json, io, base64
+import os, json, io, base64, http.server
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
