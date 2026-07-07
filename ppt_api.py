@@ -336,6 +336,29 @@ def make_handler():
                     b64 = base64.b64encode(buf.getvalue()).decode('ascii')
                     resp = json.dumps({'code': 0, 'data': b64, 'file': '学生名单.xlsx'})
                     print(f'Created xlsx: {len(names)} names')
+                elif doc_type == 'seat-export':
+                    import openpyxl, io, base64
+                    wb = openpyxl.Workbook()
+                    ws = wb.active
+                    ws.title = '座位表'
+                    grid = body.get('grid', [])
+                    col_types = body.get('cols', [])
+                    ws.cell(1, 1, '排')
+                    for ci, ct in enumerate(col_types):
+                        if ct == 'seat':
+                            ws.cell(1, ci+2, f'列{ci+1}')
+                        else:
+                            ws.cell(1, ci+2, '过道')
+                    for ri, row in enumerate(grid):
+                        ws.cell(ri+2, 1, f'第{ri+1}排')
+                        for ci, cell in enumerate(row):
+                            if isinstance(cell, dict) and cell.get('student'):
+                                ws.cell(ri+2, ci+2, cell['student'])
+                    buf = io.BytesIO()
+                    wb.save(buf)
+                    b64 = base64.b64encode(buf.getvalue()).decode('ascii')
+                    resp = json.dumps({'code': 0, 'data': b64, 'file': '座位表.xlsx'})
+                    print(f'Seat export: {len(grid)} rows')
                 elif doc_type == 'doc':
                     print(f'Generating DOC: {body.get("title","")}')
                     docx_bytes = gen_docx(body)
