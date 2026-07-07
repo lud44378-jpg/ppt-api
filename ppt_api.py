@@ -218,6 +218,82 @@ def gen_docx(data):
     return buf.getvalue()
 
 
+
+def parse_file(data):
+    """解析文档/PDF/Excel，返回文本内容"""
+    import tempfile, os
+    content = data.get('content', '')  # base64 encoded file
+    filename = data.get('filename', '')
+    if not content:
+        return '（无文件内容）'
+    
+    import base64
+    raw = base64.b64decode(content)
+    ext = filename.lower().split('.')[-1] if '.' in filename else ''
+    
+    try:
+        if ext in ('txt', 'csv', 'json', 'md', 'xml'):
+            return raw.decode('utf-8')
+        elif ext == 'pdf':
+            import pdfplumber
+            import io
+            text = ''
+            with pdfplumber.open(io.BytesIO(raw)) as pdf:
+                for page in pdf.pages:
+                    text += page.extract_text() or ''
+            return text[:50000]
+        elif ext in ('docx', 'doc'):
+            import docx
+            import io
+            doc = docx.Document(io.BytesIO(raw))
+            return '\n'.join([p.text for p in doc.paragraphs])[:50000]
+        elif ext in ('xlsx', 'xls'):
+            import openpyxl
+            import io
+            wb = openpyxl.load_workbook(io.BytesIO(raw))
+            rows = []
+            for sheet in wb.sheetnames:
+                ws = wb[sheet]
+                rows.append(f'【工作表：{sheet}】')
+                for row in ws.iter_rows(values_only=True):
+                    rows.append('\t'.join([str(c) if c is not None else '' for c in row]))
+            return '\n'.join(rows)[:50000]
+        else:
+            return f'不支持的文件格式：.{ext}'
+    except Exception as e:
+        return f'文件解析失败：{str(e)}'
+
+
+def edit_excel(data):
+    """根据AI指令修改Excel文件"""
+    import openpyxl, io, base64, json, re
+    file_b64 = data.get('file', '')
+    instructions = data.get('instructions', '')
+    if not file_b64:
+        return None, '未提供Excel文件'
+    
+    try:
+        raw = base64.b64decode(file_b64)
+        wb = openpyxl.load_workbook(io.BytesIO(raw))
+    except:
+        wb = openpyxl.Workbook()
+    
+    ws = wb.active
+    
+    # 解析简单指令：修改单元格
+    # 格式："设置 A1=张三" 或 "修改 B2=95"
+    for line in instructions.split('\n'):
+        line = line.strip()
+        m = re.match(r'设置\s*([A-Z]+)(\d+)\s*=\s*(.+)', line)
+        if m:
+            cell = m.group(1) + m.group(2)
+            ws[cell] = m.group(3).strip()
+    
+    buf = io.BytesIO()
+    wb.save(buf)
+    return base64.b64encode(buf.getvalue()).decode('ascii'), None
+
+
 # === HTTP Server ===
 def make_handler():
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -250,6 +326,15 @@ def make_handler():
                     b64 = base64.b64encode(docx_bytes).decode('ascii')
                     resp = json.dumps({'code': 0, 'data': b64, 'file': f"师助AI_{body.get('title','')}.docx"})
                     print(f'Done: {len(docx_bytes)} bytes')
+                elif doc_type == 'parse':
+                    text = parse_file(body)
+                    resp = json.dumps({'code': 0, 'data': text})
+                elif doc_type == 'edit-excel':
+                    b64_data, err = edit_excel(body)
+                    if err:
+                        resp = json.dumps({'code': -1, 'error': err})
+                    else:
+                        resp = json.dumps({'code': 0, 'data': b64_data, 'file': 'edited.xlsx'})
                 else:
                     print(f'Generating PPT: {body.get("title","")}')
                     pptx_bytes = gen(body)
