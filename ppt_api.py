@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """师助AI - PPT生成 API (部署到 Railway / Render)"""
-import os, json, io, base64, http.server
+import os, json, io, base64, http.server, uuid, tempfile
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
 from pptx.enum.shapes import MSO_SHAPE
+
+DL_DIR = tempfile.mkdtemp(prefix="seat_dl_")
+
+DL_DIR = tempfile.mkdtemp(prefix='seat_dl_')  # download temp dir
+
+
+DL_DIR = tempfile.mkdtemp(prefix="seat_dl_")
+
 
 THEME = {
     'exam':    ('#1A237E', '#2B579A', '#E53935', '#E8EAF6'),
@@ -27,6 +35,9 @@ def detect(t):
     if '健康' in s or '环保' in s or '运动' in s: return 'health'
     if '总结' in s or '计划' in s or '规划' in s: return 'plan'
     return 'default'
+
+DL_DIR = tempfile.mkdtemp(prefix="seat_dl_")
+
 
 def gen(data):
     th = THEME.get(detect(data.get('title','')), THEME['default'])
@@ -308,6 +319,27 @@ def make_handler():
             self.end_headers()
 
         def do_GET(self):
+            if self.path.startswith('/dl/'):
+                file_id = self.path.split('/')[-1]
+                for f in os.listdir(DL_DIR):
+                    if f.endswith(file_id):
+                        fpath = os.path.join(DL_DIR, f)
+                        try:
+                            with open(fpath, 'rb') as fh:
+                                data = fh.read()
+                            os.remove(fpath)
+                            self.send_response(200)
+                            self.send_header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+                            self.send_header('Content-Disposition', 'attachment; filename="seat.xlsx"')
+                            self._set_cors()
+                            self.end_headers()
+                            self.wfile.write(data)
+                            return
+                        except: pass
+                self.send_response(404)
+                self._set_cors()
+                self.end_headers()
+                return
             self.send_response(200)
             self.send_header('Content-Type', 'text/plain')
             self._set_cors()
@@ -356,9 +388,13 @@ def make_handler():
                                 ws.cell(ri+2, ci+2, cell['student'])
                     buf = io.BytesIO()
                     wb.save(buf)
-                    b64 = base64.b64encode(buf.getvalue()).decode('ascii')
-                    resp = json.dumps({'code': 0, 'data': b64, 'file': '座位表.xlsx'})
-                    print(f'Seat export: {len(grid)} rows')
+                    # Save to temp file and return download URL
+                    fid = str(uuid.uuid4())
+                    fpath = os.path.join(DL_DIR, fid)
+                    with open(fpath, 'wb') as fh:
+                        fh.write(buf.getvalue())
+                    resp = json.dumps({'code': 0, 'url': '/dl/' + fid})
+                    print(f'Seat export: {len(grid)} rows, url=/dl/{fid}')
                 elif doc_type == 'doc':
                     print(f'Generating DOC: {body.get("title","")}')
                     docx_bytes = gen_docx(body)
