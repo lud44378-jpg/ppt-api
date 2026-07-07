@@ -320,7 +320,23 @@ def make_handler():
                 body = json.loads(self.rfile.read(length))
                 doc_type = body.get('type', 'ppt')
                 
-                if doc_type == 'doc':
+                if doc_type == 'create-xlsx':
+                    import openpyxl, io, base64
+                    wb = openpyxl.Workbook()
+                    ws = wb.active
+                    ws.title = '学生名单'
+                    names = body.get('names', [])
+                    ws.cell(1, 1, '序号')
+                    ws.cell(1, 2, '姓名')
+                    for i, name in enumerate(names):
+                        ws.cell(i+2, 1, i+1)
+                        ws.cell(i+2, 2, name)
+                    buf = io.BytesIO()
+                    wb.save(buf)
+                    b64 = base64.b64encode(buf.getvalue()).decode('ascii')
+                    resp = json.dumps({'code': 0, 'data': b64, 'file': '学生名单.xlsx'})
+                    print(f'Created xlsx: {len(names)} names')
+                elif doc_type == 'doc':
                     print(f'Generating DOC: {body.get("title","")}')
                     docx_bytes = gen_docx(body)
                     b64 = base64.b64encode(docx_bytes).decode('ascii')
