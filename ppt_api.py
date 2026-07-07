@@ -59,7 +59,7 @@ def gen(data):
                 p2 = tf.add_paragraph(); p2.text = s['content'][0]; p2.font.size = Pt(22)
                 p2.font.color.rgb = A; p2.alignment = PP_ALIGN.CENTER; p2.space_before = Pt(16)
             continue
-        lt = (idx - 1) % 4
+        lt = (idx - 1) % 3 + 1  # 0=封面已用, 1~3=内容布局(跳过深色章节)
         if lt == 0:
             slide.background.fill.solid(); slide.background.fill.fore_color.rgb = D
             tb = slide.shapes.add_textbox(Inches(1), Inches(2.5), Inches(11), Inches(1.5))
