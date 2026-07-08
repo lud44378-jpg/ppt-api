@@ -316,7 +316,7 @@ def parse_file(data):
 
 def edit_excel(data):
     """根据AI指令修改Excel文件"""
-    import openpyxl, io, base64, json, re
+    import openpyxl, re
     file_b64 = data.get('file', '')
     instructions = data.get('instructions', '')
     if not file_b64:
@@ -391,7 +391,7 @@ def make_handler():
                 doc_type = body.get('type', 'ppt')
                 
                 if doc_type == 'create-xlsx':
-                    import openpyxl, io, base64
+                    import openpyxl
                     wb = openpyxl.Workbook()
                     ws = wb.active
                     ws.title = '学生名单'
@@ -411,7 +411,7 @@ def make_handler():
                     resp = json.dumps({'code': 0, 'url': '/dl/' + fid})
                     print(f'Created xlsx: {len(names)} names, url=/dl/{fid}')
                 elif doc_type == 'seat-export':
-                    import openpyxl, io, base64
+                    import openpyxl
                     wb = openpyxl.Workbook()
                     ws = wb.active
                     ws.title = '座位表'
@@ -470,7 +470,7 @@ def make_handler():
                             headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
                         )
                         try:
-                            r = urllib.request.urlopen(req, timeout=30)
+                            r = urllib.request.urlopen(req, timeout=120)
                             result = json.loads(r.read().decode())
                             reply = result['choices'][0]['message']['content']
                             resp = json.dumps({'code': 0, 'data': reply})
