@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """师助AI - PPT生成 API (部署到 Railway / Render)"""
-import os, json, io, base64, http.server, uuid, tempfile
+import os, json, io, base64, http.server, uuid, tempfile, urllib.request, urllib.error
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
@@ -8,12 +8,6 @@ from pptx.enum.text import PP_ALIGN
 from pptx.enum.shapes import MSO_SHAPE
 
 DL_DIR = tempfile.mkdtemp(prefix="seat_dl_")
-
-DL_DIR = tempfile.mkdtemp(prefix='seat_dl_')  # download temp dir
-
-
-DL_DIR = tempfile.mkdtemp(prefix="seat_dl_")
-
 
 THEME = {
     'exam':    ('#1A237E', '#2B579A', '#E53935', '#E8EAF6'),
@@ -35,9 +29,6 @@ def detect(t):
     if '健康' in s or '环保' in s or '运动' in s: return 'health'
     if '总结' in s or '计划' in s or '规划' in s: return 'plan'
     return 'default'
-
-DL_DIR = tempfile.mkdtemp(prefix="seat_dl_")
-
 
 def gen(data):
     th = THEME.get(detect(data.get('title','')), THEME['default'])
@@ -113,10 +104,55 @@ def gen(data):
                 tb3 = slide.shapes.add_textbox(Inches(2.0), Inches(y+0.05), Inches(10), Inches(0.6))
                 p4 = tb3.text_frame.paragraphs[0]; p4.text = item; p4.font.size = Pt(18); p4.font.color.rgb = T
 
+    # Process [插图：xxx] markers - replace with image placeholders
+    img_key = os.environ.get('AI_API_KEY', '')
+    if slides and img_key:
+        for idx, s in enumerate(slides):
+            for ci, item in enumerate(s.get('content', [])):
+                import re
+                m = re.search(r'\[\u63d2\u56fe\uff1a(.+?)\]', str(item))
+                if m:
+                    query = m.group(1).strip()
+                    s['content'][ci] = item.replace(m.group(0), '').strip()
+                    try:
+                        # Search for image using 通义千问
+                        import urllib.request, urllib.error
+                        search_q = f'搜索一张关于{query}的图片，返回一个可以直接访问的图片URL'
+                        sd = json.dumps({
+                            'model': 'qwen-turbo',
+                            'messages': [{'role': 'user', 'content': search_q}],
+                            'enable_search': True
+                        }).encode()
+                        sq = urllib.request.Request(
+                            'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
+                            data=sd,
+                            headers={'Authorization': 'Bearer ' + img_key, 'Content-Type': 'application/json'}
+                        )
+                        sr = urllib.request.urlopen(sq, timeout=30)
+                        sr_result = json.loads(sr.read().decode())
+                        img_url = ''
+                        for word in sr_result['choices'][0]['message']['content'].split():
+                            w = word.strip('.,;:!?"\'()[]<>')
+                            if w.startswith('http') and any(w.endswith(e) for e in ['.jpg','.jpeg','.png','.gif']):
+                                img_url = w
+                                break
+                        if img_url:
+                            urllib.request.urlretrieve(img_url, '/tmp/ppt_img_' + str(idx) + '.jpg')
+                            slide = prs.slides[idx]
+                            slide.shapes.add_picture('/tmp/ppt_img_' + str(idx) + '.jpg', Inches(8.5), Inches(1.5), Inches(4), Inches(3))
+                    except:
+                        # Placeholder if image search fails
+                        try:
+                            slide = prs.slides[idx]
+                            shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(8.5), Inches(1.5), Inches(4), Inches(3))
+                            shape.fill.solid(); shape.fill.fore_color.rgb = L; shape.line.fill.background()
+                            tf = shape.text_frame; tf.word_wrap = True
+                            p = tf.paragraphs[0]; p.text = query; p.font.size = Pt(14)
+                            p.font.color.rgb = D; p.alignment = PP_ALIGN.CENTER
+                        except: pass
     buf = io.BytesIO()
     prs.save(buf)
     return buf.getvalue()
-
 
 def gen_docx(data):
     """生成Word文档(python-docx)，带【】小标题识别、字体、字号、缩进"""
@@ -228,8 +264,6 @@ def gen_docx(data):
     doc.save(buf)
     return buf.getvalue()
 
-
-
 def parse_file(data):
     """解析文档/PDF/Excel，返回文本内容"""
     import tempfile, os
@@ -245,6 +279,12 @@ def parse_file(data):
     try:
         if ext in ('txt', 'csv', 'json', 'md', 'xml'):
             return raw.decode('utf-8')
+        elif ext in ('jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'):
+            vision_key = os.environ.get('AI_API_KEY', '')
+            if not vision_key:
+                return f'\u3010\u56fe\u7247\uff1a{filename}\u3011\n\uff08\u56fe\u7247\u6587\u5b57\u8bc6\u522b\u529f\u80fd\u672a\u914d\u7f6e\uff0c\u8bf7\u5728Railway\u8bbe\u7f6eVISION_API_KEY\u73af\u5883\u53d8\u91cf\uff09'
+            # TODO: integrate actual OCR API
+            return f'\u3010\u56fe\u7247\uff1a{filename}\u3011\n\uff08\u56fe\u7247OCR\u5f85\u5b9e\u73b0\uff09'
         elif ext == 'pdf':
             import pdfplumber
             import io
@@ -274,7 +314,6 @@ def parse_file(data):
     except Exception as e:
         return f'文件解析失败：{str(e)}'
 
-
 def edit_excel(data):
     """根据AI指令修改Excel文件"""
     import openpyxl, io, base64, json, re
@@ -303,7 +342,6 @@ def edit_excel(data):
     buf = io.BytesIO()
     wb.save(buf)
     return base64.b64encode(buf.getvalue()).decode('ascii'), None
-
 
 # === HTTP Server ===
 def make_handler():
@@ -410,6 +448,129 @@ def make_handler():
                         resp = json.dumps({'code': -1, 'error': err})
                     else:
                         resp = json.dumps({'code': 0, 'data': b64_data, 'file': 'edited.xlsx'})
+                elif doc_type == 'chat':
+                    import urllib.request, urllib.error
+                    # Use custom api_key from request if provided, otherwise env var
+                    api_key = body.get('api_key', '') or os.environ.get('DEEPSEEK_API_KEY', '')
+                    if not api_key:
+                        resp = json.dumps({'code': -1, 'error': '服务器未配置DeepSeek API Key，请在Railway环境变量中设置 DEEPSEEK_API_KEY'})
+                    else:
+                        messages = body.get('messages', [])
+                        model = body.get('model', 'deepseek-chat')
+                        temp = body.get('temperature', 0.7)
+                        max_tok = body.get('max_tokens', 4096)
+                        post_data = json.dumps({'model': model, 'messages': messages, 'temperature': temp, 'max_tokens': max_tok, 'stream': False}).encode()
+                        req = urllib.request.Request(
+                            'https://api.deepseek.com/v1/chat/completions',
+                            data=post_data,
+                            headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
+                        )
+                        try:
+                            r = urllib.request.urlopen(req, timeout=30)
+                            result = json.loads(r.read().decode())
+                            reply = result['choices'][0]['message']['content']
+                            resp = json.dumps({'code': 0, 'data': reply})
+                            print(f'Chat reply: {len(reply)} chars')
+                        except urllib.error.HTTPError as e:
+                            resp = json.dumps({'code': -1, 'error': 'API错误: ' + e.read().decode()[:200]})
+                        except Exception as e:
+                            resp = json.dumps({'code': -1, 'error': str(e)[:200]})
+                elif doc_type == 'search':
+                    api_key = os.environ.get('AI_API_KEY', '')
+                    if not api_key:
+                        resp = json.dumps({'code': -1, 'error': '联网搜索功能未配置（需在Railway设置 AI_API_KEY）'})
+                    else:
+                        import urllib.request, urllib.error
+                        query = body.get('query', '')
+                        search_data = json.dumps({
+                            'model': 'qwen-turbo',
+                            'messages': [{'role': 'user', 'content': query}],
+                            'enable_search': True
+                        }).encode()
+                        req = urllib.request.Request(
+                            'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
+                            data=search_data,
+                            headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
+                        )
+                        try:
+                            r = urllib.request.urlopen(req, timeout=60)
+                            result = json.loads(r.read().decode())
+                            reply = result['choices'][0]['message']['content']
+                            resp = json.dumps({'code': 0, 'data': reply})
+                        except Exception as e:
+                            resp = json.dumps({'code': -1, 'error': '搜索失败: ' + str(e)[:200]})
+                elif doc_type == 'vision':
+                    api_key = os.environ.get('AI_API_KEY', '')
+                    if not api_key:
+                        resp = json.dumps({'code': -1, 'error': '图片识别功能未配置（需在Railway设置 AI_API_KEY）'})
+                    else:
+                        import urllib.request, urllib.error
+                        image_b64 = body.get('image', '')
+                        prompt = body.get('prompt', '请描述这张图片')
+                        vision_data = json.dumps({
+                            'model': 'qwen-vl-max',
+                            'messages': [{'role': 'user', 'content': [
+                                {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}},
+                                {'type': 'text', 'text': prompt}
+                            ]}]
+                        }).encode()
+                        req = urllib.request.Request(
+                            'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
+                            data=vision_data,
+                            headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
+                        )
+                        try:
+                            r = urllib.request.urlopen(req, timeout=60)
+                            result = json.loads(r.read().decode())
+                            reply = result['choices'][0]['message']['content']
+                            resp = json.dumps({'code': 0, 'data': reply})
+                        except Exception as e:
+                            resp = json.dumps({'code': -1, 'error': '识别失败: ' + str(e)[:200]})
+                elif doc_type == 'generate-image':
+                    api_key = os.environ.get('AI_API_KEY', '')
+                    if not api_key:
+                        resp = json.dumps({'code': -1, 'error': 'AI生图功能未配置（需在Railway设置 AI_API_KEY）'})
+                    else:
+                        import urllib.request, urllib.error, time
+                        prompt = body.get('prompt', '')
+                        img_data = json.dumps({
+                            'model': 'wanx2.1-t2i-turbo',
+                            'input': {'prompt': prompt},
+                            'parameters': {'size': '1024*1024', 'n': 1}
+                        }).encode()
+                        req = urllib.request.Request(
+                            'https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis',
+                            data=img_data,
+                            headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
+                        )
+                        try:
+                            r = urllib.request.urlopen(req, timeout=120)
+                            result = json.loads(r.read().decode())
+                            task_id = result.get('output', {}).get('task_id', '')
+                            if task_id:
+                                # Poll for result
+                                for _ in range(30):
+                                    time.sleep(2)
+                                    poll_req = urllib.request.Request(
+                                        f'https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}',
+                                        headers={'Authorization': 'Bearer ' + api_key}
+                                    )
+                                    poll_r = urllib.request.urlopen(poll_req, timeout=30)
+                                    poll_result = json.loads(poll_r.read().decode())
+                                    status = poll_result.get('output', {}).get('task_status', '')
+                                    if status == 'SUCCEEDED':
+                                        img_url = poll_result.get('output', {}).get('results', [{}])[0].get('url', '')
+                                        resp = json.dumps({'code': 0, 'data': img_url, 'format': 'url'})
+                                        break
+                                    elif status in ('FAILED', 'CANCELED'):
+                                        resp = json.dumps({'code': -1, 'error': '生图失败'})
+                                        break
+                                else:
+                                    resp = json.dumps({'code': -1, 'error': '生图超时'})
+                            else:
+                                resp = json.dumps({'code': -1, 'error': '提交生图任务失败'})
+                        except Exception as e:
+                            resp = json.dumps({'code': -1, 'error': '生图失败: ' + str(e)[:200]})
                 else:
                     print(f'Generating PPT: {body.get("title","")}')
                     pptx_bytes = gen(body)
