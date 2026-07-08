@@ -403,9 +403,13 @@ def make_handler():
                         ws.cell(i+2, 2, name)
                     buf = io.BytesIO()
                     wb.save(buf)
-                    b64 = base64.b64encode(buf.getvalue()).decode('ascii')
-                    resp = json.dumps({'code': 0, 'data': b64, 'file': '学生名单.xlsx'})
-                    print(f'Created xlsx: {len(names)} names')
+                    # Save to temp file and return download URL
+                    fid = str(uuid.uuid4())
+                    fpath = os.path.join(DL_DIR, fid)
+                    with open(fpath, 'wb') as fh:
+                        fh.write(buf.getvalue())
+                    resp = json.dumps({'code': 0, 'url': '/dl/' + fid})
+                    print(f'Created xlsx: {len(names)} names, url=/dl/{fid}')
                 elif doc_type == 'seat-export':
                     import openpyxl, io, base64
                     wb = openpyxl.Workbook()
