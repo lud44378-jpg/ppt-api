@@ -286,21 +286,23 @@ def parse_file(data):
             import urllib.request, urllib.error, base64
             img_b64 = base64.b64encode(raw).decode('ascii')
             ocr_data = json.dumps({
-                'model': 'Qwen3-VL-Flash',
-                'messages': [{'role': 'user', 'content': [
-                    {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{img_b64}'}},
-                    {'type': 'text', 'text': '\u8bf7\u63d0\u53d6\u8fd9\u5f20\u56fe\u7247\u4e2d\u7684\u6240\u6709\u6587\u5b57\u5185\u5bb9\uff0c\u76f4\u63a5\u8f93\u51fa\u6587\u5b57\uff0c\u4e0d\u8981\u989d\u5916\u8bf4\u660e'}
-                ]}]
+                'model': 'qwen3-vl-flash',
+                'input': {
+                    'messages': [{'role': 'user', 'content': [
+                        {'image': f'data:image/jpeg;base64,{img_b64}'},
+                        {'text': '\u8bf7\u63d0\u53d6\u8fd9\u5f20\u56fe\u7247\u4e2d\u7684\u6240\u6709\u6587\u5b57\u5185\u5bb9\uff0c\u76f4\u63a5\u8f93\u51fa\u6587\u5b57\uff0c\u4e0d\u8981\u989d\u5916\u8bf4\u660e'}
+                    ]}]       # close content[], msg{}, msg_array[]
+                }            # close input{}
             }).encode()
             req = urllib.request.Request(
-                'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
+                'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
                 data=ocr_data,
                 headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
             )
             try:
                 r = urllib.request.urlopen(req, timeout=60)
                 result = json.loads(r.read().decode())
-                text = result['choices'][0]['message']['content']
+                text = result['output']['choices'][0]['message']['content']
                 return f'\u3010\u56fe\u7247\uff1a{filename}\u3011\n{text}'
             except Exception as e:
                 return f'\u3010\u56fe\u7247\uff1a{filename}\u3011\n\uff08OCR\u8bc6\u522b\u5931\u8d25\uff1a{str(e)[:200]}\uff09'
@@ -541,7 +543,7 @@ def make_handler():
                         image_b64 = body.get('image', '')
                         prompt = body.get('prompt', '请描述这张图片')
                         vision_data = json.dumps({
-                            'model': 'Qwen3-VL-Flash',
+                            'model': 'qwen3-vl-flash',
                             'messages': [{'role': 'user', 'content': [
                                 {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}},
                                 {'type': 'text', 'text': prompt}
@@ -567,7 +569,7 @@ def make_handler():
                         import urllib.request, urllib.error, time
                         prompt = body.get('prompt', '')
                         img_data = json.dumps({
-                            'model': 'Z-Image-Turbo',
+                            'model': 'z-image-turbo',
                             'input': {'prompt': prompt},
                             'parameters': {'size': '1024*1024', 'n': 1}
                         }).encode()
@@ -613,21 +615,23 @@ def make_handler():
                         image_b64 = body.get('image', '')
                         # Step 1: OCR using qwen-vl-max
                         ocr_data = json.dumps({
-                            'model': 'Qwen3-VL-Flash',
-                            'messages': [{'role': 'user', 'content': [
-                                {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}},
-                                {'type': 'text', 'text': '\u8bf7\u8bc6\u522b\u8fd9\u5f20\u56fe\u7247\u4e2d\u7684\u6240\u6709\u6587\u5b57\u3002\u5982\u679c\u662f\u8868\u683c\u6570\u636e\uff0c\u7528\u5236\u8868\u7b26\t\u5206\u9694\u5217\uff0c\u6bcf\u884c\u4e00\u6761\u8bb0\u5f55\u3002\u5982\u679c\u662f\u6bb5\u843d\u6587\u5b57\uff0c\u76f4\u63a5\u8f93\u51fa\u6587\u5b57\u5185\u5bb9\u3002'}
-                            ]}]
+                            'model': 'qwen3-vl-flash',
+                            'input': {
+                                'messages': [{'role': 'user', 'content': [
+                                    {'image': f'data:image/jpeg;base64,{image_b64}'},
+                                    {'text': '\u8bf7\u8bc6\u522b\u8fd9\u5f20\u56fe\u7247\u4e2d\u7684\u6240\u6709\u6587\u5b57\u3002\u5982\u679c\u662f\u8868\u683c\u6570\u636e\uff0c\u7528\u5236\u8868\u7b26\t\u5206\u9694\u5217\uff0c\u6bcf\u884c\u4e00\u6761\u8bb0\u5f55\u3002\u5982\u679c\u662f\u6bb5\u843d\u6587\u5b57\uff0c\u76f4\u63a5\u8f93\u51fa\u6587\u5b57\u5185\u5bb9\u3002'}
+                                ]}]       # close content[], msg_obj{}, msg_array[]
+                            }              # close input{}
                         }).encode()
                         req = urllib.request.Request(
-                            'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
+                            'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
                             data=ocr_data,
                             headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
                         )
                         try:
                             r = urllib.request.urlopen(req, timeout=60)
                             result = json.loads(r.read().decode())
-                            text = result['choices'][0]['message']['content']
+                            text = result['output']['choices'][0]['message']['content']
                             # Step 2: Detect if table or text
                             detect_data = json.dumps({
                                 'model': 'qwen-turbo',
