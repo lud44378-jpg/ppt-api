@@ -295,14 +295,14 @@ def parse_file(data):
                 }            # close input{}
             }).encode()
             req = urllib.request.Request(
-                'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+                'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
                 data=ocr_data,
                 headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
             )
             try:
                 r = urllib.request.urlopen(req, timeout=60)
                 result = json.loads(r.read().decode())
-                text = result['output']['choices'][0]['message']['content']
+                text = result['choices'][0]['message']['content']
                 return f'\u3010\u56fe\u7247\uff1a{filename}\u3011\n{text}'
             except Exception as e:
                 return f'\u3010\u56fe\u7247\uff1a{filename}\u3011\n\uff08OCR\u8bc6\u522b\u5931\u8d25\uff1a{str(e)[:200]}\uff09'
@@ -624,14 +624,14 @@ def make_handler():
                             }              # close input{}
                         }).encode()
                         req = urllib.request.Request(
-                            'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+                            'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
                             data=ocr_data,
                             headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
                         )
                         try:
                             r = urllib.request.urlopen(req, timeout=60)
                             result = json.loads(r.read().decode())
-                            text = result['output']['choices'][0]['message']['content']
+                            text = result['choices'][0]['message']['content']
                             # Step 2: Detect if table or text
                             detect_data = json.dumps({
                                 'model': 'qwen-turbo',
