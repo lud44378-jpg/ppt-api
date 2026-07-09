@@ -105,7 +105,7 @@ def gen(data):
                 p4 = tb3.text_frame.paragraphs[0]; p4.text = item; p4.font.size = Pt(18); p4.font.color.rgb = T
 
     # Process [插图：xxx] markers - replace with image placeholders
-    img_key = os.environ.get('AI_API_KEY', '')
+    img_key = os.environ.get('AI_API_KEY', '').strip()
     if slides and img_key:
         for idx, s in enumerate(slides):
             for ci, item in enumerate(s.get('content', [])):
@@ -280,7 +280,7 @@ def parse_file(data):
         if ext in ('txt', 'csv', 'json', 'md', 'xml'):
             return raw.decode('utf-8')
         elif ext in ('jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'):
-            api_key = os.environ.get('AI_API_KEY', '')
+            api_key = os.environ.get('AI_API_KEY', '').strip()
             if not api_key:
                 return f'\u3010\u56fe\u7247\uff1a{filename}\u3011\n\uff08\u56fe\u7247\u6587\u5b57\u8bc6\u522b\u672a\u914d\u7f6e\uff0c\u9700\u8bbe\u7f6eAI_API_KEY\uff09'
             import urllib.request, urllib.error, base64
@@ -486,7 +486,7 @@ def make_handler():
                 elif doc_type == 'chat':
                     import urllib.request, urllib.error
                     # Use custom api_key from request if provided, otherwise env var
-                    api_key = body.get('api_key', '') or os.environ.get('DEEPSEEK_API_KEY', '')
+                    api_key = body.get('api_key', '') or os.environ.get('DEEPSEEK_API_KEY', '').strip()
                     if not api_key:
                         resp = json.dumps({'code': -1, 'error': '服务器未配置DeepSeek API Key，请在Railway环境变量中设置 DEEPSEEK_API_KEY'})
                     else:
@@ -511,7 +511,7 @@ def make_handler():
                         except Exception as e:
                             resp = json.dumps({'code': -1, 'error': str(e)[:200]})
                 elif doc_type == 'search':
-                    api_key = os.environ.get('AI_API_KEY', '')
+                    api_key = os.environ.get('AI_API_KEY', '').strip()
                     if not api_key:
                         resp = json.dumps({'code': -1, 'error': '联网搜索功能未配置（需在Railway设置 AI_API_KEY）'})
                     else:
@@ -535,7 +535,7 @@ def make_handler():
                         except Exception as e:
                             resp = json.dumps({'code': -1, 'error': '搜索失败: ' + str(e)[:200]})
                 elif doc_type == 'vision':
-                    api_key = os.environ.get('AI_API_KEY', '')
+                    api_key = os.environ.get('AI_API_KEY', '').strip()
                     if not api_key:
                         resp = json.dumps({'code': -1, 'error': '图片识别功能未配置（需在Railway设置 AI_API_KEY）'})
                     else:
@@ -562,7 +562,7 @@ def make_handler():
                         except Exception as e:
                             resp = json.dumps({'code': -1, 'error': '识别失败: ' + str(e)[:200]})
                 elif doc_type == 'generate-image':
-                    api_key = os.environ.get('AI_API_KEY', '')
+                    api_key = os.environ.get('AI_API_KEY', '').strip()
                     if not api_key:
                         resp = json.dumps({'code': -1, 'error': 'AI生图功能未配置（需在Railway设置 AI_API_KEY）'})
                     else:
@@ -607,7 +607,7 @@ def make_handler():
                         except Exception as e:
                             resp = json.dumps({'code': -1, 'error': '生图失败: ' + str(e)[:200]})
                 elif doc_type == 'handwriting':
-                    api_key = os.environ.get('AI_API_KEY', '')
+                    api_key = os.environ.get('AI_API_KEY', '').strip()
                     if not api_key:
                         resp = json.dumps({'code': -1, 'error': '\u9700\u8981\u914d\u7f6eAI_API_KEY'})
                     else:
