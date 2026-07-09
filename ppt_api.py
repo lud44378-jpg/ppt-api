@@ -578,9 +578,12 @@ def make_handler():
                 else:
                     print(f'Generating PPT: {body.get("title","")}')
                     pptx_bytes = gen(body)
-                    b64 = base64.b64encode(pptx_bytes).decode('ascii')
-                    resp = json.dumps({'code': 0, 'data': b64, 'file': f"师助AI_{body.get('title','PPT')}.pptx"})
-                    print(f'Done: {len(pptx_bytes)} bytes')
+                    fid = str(uuid.uuid4())
+                    fpath = os.path.join(DL_DIR, fid)
+                    with open(fpath, 'wb') as fh:
+                        fh.write(pptx_bytes)
+                    resp = json.dumps({'code': 0, 'url': '/dl/' + fid})
+                    print(f'Done: {len(pptx_bytes)} bytes, url=/dl/{fid}')
                 
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
