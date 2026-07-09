@@ -295,7 +295,7 @@ def parse_file(data):
                 }            # close input{}
             }).encode()
             req = urllib.request.Request(
-                'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+                'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
                 data=ocr_data,
                 headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
             )
@@ -574,7 +574,7 @@ def make_handler():
                             'parameters': {'size': '1024*1024', 'n': 1}
                         }).encode()
                         req = urllib.request.Request(
-                            'https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis',
+                            'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis',
                             data=img_data,
                             headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
                         )
@@ -587,7 +587,7 @@ def make_handler():
                                 for _ in range(30):
                                     time.sleep(2)
                                     poll_req = urllib.request.Request(
-                                        f'https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}',
+                                        f'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/tasks/{task_id}',
                                         headers={'Authorization': 'Bearer ' + api_key}
                                     )
                                     poll_r = urllib.request.urlopen(poll_req, timeout=30)
@@ -624,7 +624,7 @@ def make_handler():
                             }              # close input{}
                         }).encode()
                         req = urllib.request.Request(
-                            'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+                            'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
                             data=ocr_data,
                             headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
                         )
