@@ -73,7 +73,7 @@ def gen(data):
             bar.fill.solid(); bar.fill.fore_color.rgb = D; bar.line.fill.background()
             tf = bar.text_frame; tf.word_wrap = True
             p = tf.paragraphs[0]; p.text = '  ' + s.get('title',''); p.font.size = Pt(32); p.font.bold = True; p.font.color.rgb = W
-            for i, item in enumerate(s.get('content',[])):
+            for i, item in enumerate(s.get('content',[])[:6]):
                 tb2 = slide.shapes.add_textbox(Inches(1.2), Inches(2.0+i*0.6), Inches(11), Inches(0.55))
                 p2 = tb2.text_frame.paragraphs[0]; p2.text = '▪  ' + item; p2.font.size = Pt(18); p2.font.color.rgb = T
         elif lt == 2:
@@ -95,7 +95,7 @@ def gen(data):
             p2 = tb2.text_frame.paragraphs[0]; p2.text = s.get('title',''); p2.font.size = Pt(30); p2.font.bold = True; p2.font.color.rgb = P
             line = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.8), Inches(1.2), Inches(11.5), Pt(4))
             line.fill.solid(); line.fill.fore_color.rgb = A; line.line.fill.background()
-            for i, item in enumerate(s.get('content',[])):
+            for i, item in enumerate(s.get('content',[])[:6]):
                 y = 1.8 + i * 1.4
                 circle = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(0.8), Inches(y), Inches(0.7), Inches(0.7))
                 circle.fill.solid(); circle.fill.fore_color.rgb = P; circle.line.fill.background()
@@ -280,11 +280,30 @@ def parse_file(data):
         if ext in ('txt', 'csv', 'json', 'md', 'xml'):
             return raw.decode('utf-8')
         elif ext in ('jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'):
-            vision_key = os.environ.get('AI_API_KEY', '')
-            if not vision_key:
-                return f'\u3010\u56fe\u7247\uff1a{filename}\u3011\n\uff08\u56fe\u7247\u6587\u5b57\u8bc6\u522b\u529f\u80fd\u672a\u914d\u7f6e\uff0c\u8bf7\u5728Railway\u8bbe\u7f6eVISION_API_KEY\u73af\u5883\u53d8\u91cf\uff09'
-            # TODO: integrate actual OCR API
-            return f'\u3010\u56fe\u7247\uff1a{filename}\u3011\n\uff08\u56fe\u7247OCR\u5f85\u5b9e\u73b0\uff09'
+            api_key = os.environ.get('AI_API_KEY', '')
+            if not api_key:
+                return f'\u3010\u56fe\u7247\uff1a{filename}\u3011\n\uff08\u56fe\u7247\u6587\u5b57\u8bc6\u522b\u672a\u914d\u7f6e\uff0c\u9700\u8bbe\u7f6eAI_API_KEY\uff09'
+            import urllib.request, urllib.error, base64
+            img_b64 = base64.b64encode(raw).decode('ascii')
+            ocr_data = json.dumps({
+                'model': 'qwen-vl-max',
+                'messages': [{'role': 'user', 'content': [
+                    {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{img_b64}'}},
+                    {'type': 'text', 'text': '\u8bf7\u63d0\u53d6\u8fd9\u5f20\u56fe\u7247\u4e2d\u7684\u6240\u6709\u6587\u5b57\u5185\u5bb9\uff0c\u76f4\u63a5\u8f93\u51fa\u6587\u5b57\uff0c\u4e0d\u8981\u989d\u5916\u8bf4\u660e'}
+                ]}]
+            }).encode()
+            req = urllib.request.Request(
+                'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
+                data=ocr_data,
+                headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
+            )
+            try:
+                r = urllib.request.urlopen(req, timeout=60)
+                result = json.loads(r.read().decode())
+                text = result['choices'][0]['message']['content']
+                return f'\u3010\u56fe\u7247\uff1a{filename}\u3011\n{text}'
+            except Exception as e:
+                return f'\u3010\u56fe\u7247\uff1a{filename}\u3011\n\uff08OCR\u8bc6\u522b\u5931\u8d25\uff1a{str(e)[:200]}\uff09'
         elif ext == 'pdf':
             import pdfplumber
             import io
@@ -585,6 +604,76 @@ def make_handler():
                                 resp = json.dumps({'code': -1, 'error': '提交生图任务失败'})
                         except Exception as e:
                             resp = json.dumps({'code': -1, 'error': '生图失败: ' + str(e)[:200]})
+                elif doc_type == 'handwriting':
+                    api_key = os.environ.get('AI_API_KEY', '')
+                    if not api_key:
+                        resp = json.dumps({'code': -1, 'error': '\u9700\u8981\u914d\u7f6eAI_API_KEY'})
+                    else:
+                        import urllib.request, urllib.error, base64 as b64mod
+                        image_b64 = body.get('image', '')
+                        # Step 1: OCR using qwen-vl-max
+                        ocr_data = json.dumps({
+                            'model': 'qwen-vl-max',
+                            'messages': [{'role': 'user', 'content': [
+                                {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}},
+                                {'type': 'text', 'text': '\u8bf7\u8bc6\u522b\u8fd9\u5f20\u56fe\u7247\u4e2d\u7684\u6240\u6709\u6587\u5b57\u3002\u5982\u679c\u662f\u8868\u683c\u6570\u636e\uff0c\u7528\u5236\u8868\u7b26\t\u5206\u9694\u5217\uff0c\u6bcf\u884c\u4e00\u6761\u8bb0\u5f55\u3002\u5982\u679c\u662f\u6bb5\u843d\u6587\u5b57\uff0c\u76f4\u63a5\u8f93\u51fa\u6587\u5b57\u5185\u5bb9\u3002'}
+                            ]}]
+                        }).encode()
+                        req = urllib.request.Request(
+                            'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
+                            data=ocr_data,
+                            headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
+                        )
+                        try:
+                            r = urllib.request.urlopen(req, timeout=60)
+                            result = json.loads(r.read().decode())
+                            text = result['choices'][0]['message']['content']
+                            # Step 2: Detect if table or text
+                            detect_data = json.dumps({
+                                'model': 'qwen-turbo',
+                                'messages': [{'role': 'user', 'content': f'\u5224\u65ad\u4ee5\u4e0b\u5185\u5bb9\u662f\u8868\u683c\u6570\u636e\u8fd8\u662f\u6bb5\u843d\u6587\u5b57\uff0c\u53ea\u56de\u7b54"table"\u6216"text"\uff1a\n{text[:1500]}'}],
+                                'temperature': 0.1
+                            }).encode()
+                            detect_req = urllib.request.Request(
+                                'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
+                                data=detect_data,
+                                headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
+                            )
+                            detect_r = urllib.request.urlopen(detect_req, timeout=30)
+                            detect_result = json.loads(detect_r.read().decode())
+                            doc_type_detected = detect_result['choices'][0]['message']['content'].strip().lower()
+                            
+                            if 'table' in doc_type_detected:
+                                # Generate Excel
+                                import openpyxl
+                                wb = openpyxl.Workbook()
+                                ws = wb.active
+                                ws.title = '\u6570\u636e'
+                                lines = text.strip().split('\n')
+                                for ri, line in enumerate(lines):
+                                    cells = line.split('\t')
+                                    for ci, cell in enumerate(cells):
+                                        ws.cell(ri+1, ci+1, cell.strip())
+                                buf = io.BytesIO()
+                                wb.save(buf)
+                                fid = str(uuid.uuid4())
+                                fpath = os.path.join(DL_DIR, fid)
+                                with open(fpath, 'wb') as fh: fh.write(buf.getvalue())
+                                resp = json.dumps({'code': 0, 'url': '/dl/' + fid, 'detected': 'table', 'ocrText': text[:5000]})
+                                print(f'Handwriting: detected as table, {len(lines)} rows')
+                            else:
+                                # Generate Word
+                                w_data = {'title': '\u624b\u5199\u6587\u6863', 'content': text}
+                                docx_bytes = gen_docx(w_data)
+                                fid = str(uuid.uuid4())
+                                fpath = os.path.join(DL_DIR, fid)
+                                with open(fpath, 'wb') as fh: fh.write(docx_bytes)
+                                resp = json.dumps({'code': 0, 'url': '/dl/' + fid, 'detected': 'text', 'ocrText': text[:5000]})
+                                print(f'Handwriting: detected as text, {len(text)} chars')
+                        except urllib.error.HTTPError as e:
+                            resp = json.dumps({'code': -1, 'error': 'API\u9519\u8bef: ' + e.read().decode()[:200]})
+                        except Exception as e:
+                            resp = json.dumps({'code': -1, 'error': str(e)[:200]})
                 else:
                     print(f'Generating PPT: {body.get("title","")}')
                     pptx_bytes = gen(body)
