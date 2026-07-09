@@ -298,6 +298,16 @@ def parse_file(data):
             import io
             doc = docx.Document(io.BytesIO(raw))
             return '\n'.join([p.text for p in doc.paragraphs])[:50000]
+        elif ext in ('pptx', 'ppt'):
+            from pptx import Presentation
+            import io
+            prs = Presentation(io.BytesIO(raw))
+            text = ''
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, 'text') and shape.text:
+                        text += shape.text + '\n'
+            return text[:50000] if text else '（PPT文件无可提取文字）'
         elif ext in ('xlsx', 'xls'):
             import openpyxl
             import io
