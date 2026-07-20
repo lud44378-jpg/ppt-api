@@ -285,12 +285,23 @@ def parse_file(data):
                 return f'\u3010\u56fe\u7247\uff1a{filename}\u3011\n\uff08\u56fe\u7247\u6587\u5b57\u8bc6\u522b\u672a\u914d\u7f6e\uff0c\u9700\u8bbe\u7f6eAI_API_KEY\uff09'
             import urllib.request, urllib.error, base64
             img_b64 = base64.b64encode(raw).decode('ascii')
+            # Auto-detect image format
+            if raw[:4] == b'\x89PNG':
+                mime_type = 'png'
+            elif raw[:3] == b'\xff\xd8\xff':
+                mime_type = 'jpeg'
+            elif raw[:4] in (b'GIF8',):
+                mime_type = 'gif'
+            elif raw[:2] == b'BM':
+                mime_type = 'bmp'
+            else:
+                mime_type = 'jpeg'
             # First try old DashScope format (works with sk- keys)
             ocr_data = json.dumps({
                 'model': 'qwen3-vl-flash',
                 'input': {
                     'messages': [{'role': 'user', 'content': [
-                        {'image': f'data:image/jpeg;base64,{img_b64}'},
+                        {'image': 'data:image/' + mime_type + ';base64,' + img_b64},
                         {'text': '请提取这张图片中的所有文字内容，直接输出文字，不要额外说明'}
                     ]}]
                 }
@@ -317,7 +328,7 @@ def parse_file(data):
                 ws_resp = ws_client.chat.completions.create(
                     model='qwen3-vl-flash',
                     messages=[{'role': 'user', 'content': [
-                        {'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,' + img_b64}},
+                        {'type': 'image_url', 'image_url': {'url': 'data:image/' + mime_type + ';base64,' + img_b64}},
                         {'type': 'text', 'text': '\u8bf7\u63d0\u53d6\u8fd9\u5f20\u56fe\u7247\u4e2d\u7684\u6240\u6709\u6587\u5b57\u5185\u5bb9\uff0c\u76f4\u63a5\u8f93\u51fa\u6587\u5b57\uff0c\u4e0d\u8981\u989d\u5916\u8bf4\u660e'}
                     ]}],
                     timeout=60
