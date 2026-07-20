@@ -307,31 +307,25 @@ def parse_file(data):
                 return '【图片：' + filename + '】\n' + text
             except Exception:
                 pass  # fallback to workspace URL below
-            # Fallback: try workspace URL with OpenAI-compatible format (for sk-ws- keys)
+            # Fallback: try workspace URL with OpenAI SDK (for sk-ws- keys)
             try:
-                ws_data = json.dumps({
-                    'model': 'qwen3-vl-flash',
-                    'messages': [{'role': 'user', 'content': [
+                from openai import OpenAI
+                ws_client = OpenAI(
+                    api_key=api_key,
+                    base_url='https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1'
+                )
+                ws_resp = ws_client.chat.completions.create(
+                    model='qwen3-vl-flash',
+                    messages=[{'role': 'user', 'content': [
                         {'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,' + img_b64}},
                         {'type': 'text', 'text': '\u8bf7\u63d0\u53d6\u8fd9\u5f20\u56fe\u7247\u4e2d\u7684\u6240\u6709\u6587\u5b57\u5185\u5bb9\uff0c\u76f4\u63a5\u8f93\u51fa\u6587\u5b57\uff0c\u4e0d\u8981\u989d\u5916\u8bf4\u660e'}
-                    ]}]
-                }).encode()
-                ws_req = urllib.request.Request(
-                    'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
-                    data=ws_data,
-                    headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
+                    ]}],
+                    timeout=60
                 )
-                r2 = urllib.request.urlopen(ws_req, timeout=60)
-                raw_resp = r2.read()
-                try:
-                    result2 = json.loads(raw_resp.decode('utf-8'))
-                    text2 = result2['choices'][0]['message']['content']
-                    return '\u3010\u56fe\u7247\uff1a' + filename + '\u3011\n' + text2
-                except Exception as json_err:
-                    return '\u3010\u56fe\u7247\uff1a' + filename + '\u3011\n\uff08OCR\u54cd\u5e94\u4e0d\u662f\u6709\u6548JSON\uff1a' + raw_resp[:500].decode('utf-8', errors='replace') + '\uff09'
+                text2 = ws_resp.choices[0].message.content
+                return '\u3010\u56fe\u7247\uff1a' + filename + '\u3011\n' + text2
             except Exception as e2:
                 return '\u3010\u56fe\u7247\uff1a' + filename + '\u3011\n\uff08OCR\u8bc6\u522b\u5931\u8d25\uff1a' + str(e2)[:300] + '\uff09'
-                        
         elif ext == 'pdf':
             import pdfplumber
             import io
