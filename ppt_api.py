@@ -377,7 +377,9 @@ def parse_file(data):
         else:
             return f'不支持的文件格式：.{ext}'
     except Exception as e:
-        return f'文件解析失败：{str(e)}'
+        # 让 HTTP 层返回 code=-1。不能把异常伪装成文件文字，
+        # 否则前端会继续把它交给 DeepSeek 做“文件总结”。
+        raise RuntimeError(f'文件解析失败：{str(e)}') from e
 
 def edit_excel(data):
     """根据AI指令修改Excel文件"""
