@@ -282,7 +282,7 @@ def parse_file(data):
         elif ext in ('jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'):
             api_key = os.environ.get('AI_API_KEY', '').strip()
             if not api_key:
-                return f'\u3010\u56fe\u7247\uff1a{filename}\u3011\n\uff08\u56fe\u7247\u6587\u5b57\u8bc6\u522b\u672a\u914d\u7f6e\uff0c\u9700\u8bbe\u7f6eAI_API_KEY\uff09'
+                raise RuntimeError('图片文字识别未配置：请在 Railway Variables 中设置 AI_API_KEY')
             import urllib.request, urllib.error, base64
             img_b64 = base64.b64encode(raw).decode('ascii')
             # Auto-detect image format
@@ -296,7 +296,8 @@ def parse_file(data):
                 mime_type = 'bmp'
             else:
                 mime_type = 'jpeg'
-            # First try old DashScope format (works with sk- keys)
+            # 两个阿里接口使用相同的多模态请求体。不要吞掉首个异常，
+            # 否则下游会把异常文字当成“文件内容”交给 AI 总结。
             ocr_data = json.dumps({
                 'model': 'qwen3-vl-flash',
                 'input': {
@@ -306,45 +307,39 @@ def parse_file(data):
                     ]}]
                 }
             }).encode()
-            req = urllib.request.Request(
+            endpoints = [
                 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
-                data=ocr_data,
-                headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
-            )
-            try:
-                r = urllib.request.urlopen(req, timeout=120)
-                result = json.loads(r.read().decode())
-                text = result['output']['choices'][0]['message']['content']
-                return '【图片：' + filename + '】\n' + text
-            except Exception:
-                pass  # fallback to workspace URL below
-            # Fallback: try workspace URL with DashScope native format (for sk-ws- keys)
-            try:
-                ws_data = json.dumps({
-                    'model': 'qwen3-vl-flash',
-                    'input': {
-                        'messages': [{'role': 'user', 'content': [
-                            {'image': 'data:image/' + mime_type + ';base64,' + img_b64},
-                            {'text': '\u8bf7\u63d0\u53d6\u8fd9\u5f20\u56fe\u7247\u4e2d\u7684\u6240\u6709\u6587\u5b57\u5185\u5bb9\uff0c\u76f4\u63a5\u8f93\u51fa\u6587\u5b57\uff0c\u4e0d\u8981\u989d\u5916\u8bf4\u660e'}
-                        ]}]
-                    }
-                }, ensure_ascii=False).encode('utf-8')
-                ws_req = urllib.request.Request(
-                    'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
-                    data=ws_data,
+                'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+            ]
+            errors = []
+            for endpoint in endpoints:
+                req = urllib.request.Request(
+                    endpoint,
+                    data=ocr_data,
                     headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
                 )
-                r2 = urllib.request.urlopen(ws_req, timeout=120)
-                raw2 = r2.read()
                 try:
-                    result2 = json.loads(raw2.decode('utf-8'))
-                    text2 = result2['output']['choices'][0]['message']['content']
-                    return '\u3010\u56fe\u7247\uff1a' + filename + '\u3011\n' + text2
-                except:
-                    return '\u3010\u56fe\u7247\uff1a' + filename + '\u3011\n\uff08\u54cd\u5e94\u975eJSON\uff1a' + raw2[:800].decode('utf-8', errors='replace') + '\uff09'
-            except Exception as e2:
-                import traceback
-                return '\u3010\u56fe\u7247\uff1a' + filename + '\u3011\n\uff08OCR\u5931\u8d25\uff1a' + str(e2)[:500] + ' | ' + traceback.format_exc()[:500] + '\uff09'
+                    response = urllib.request.urlopen(req, timeout=120)
+                    result = json.loads(response.read().decode('utf-8'))
+                    text = result['output']['choices'][0]['message']['content']
+                    # 部分多模态模型会把内容返回为片段数组。
+                    if isinstance(text, list):
+                        text = ''.join(
+                            part.get('text', '') if isinstance(part, dict) else str(part)
+                            for part in text
+                        )
+                    text = str(text).strip()
+                    if not text:
+                        raise ValueError('识别接口未返回文字内容')
+                    return '【图片：' + filename + '】\n' + text
+                except urllib.error.HTTPError as err:
+                    detail = err.read()[:500].decode('utf-8', errors='replace')
+                    errors.append('HTTP ' + str(err.code) + ': ' + detail)
+                except Exception as err:
+                    errors.append(str(err)[:500])
+
+            detail = '；'.join(errors) or '未知错误'
+            raise RuntimeError('图片文字识别失败：' + detail)
         elif ext == 'pdf':
             import pdfplumber
             import io
