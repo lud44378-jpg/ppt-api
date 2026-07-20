@@ -312,7 +312,7 @@ def parse_file(data):
                 headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
             )
             try:
-                r = urllib.request.urlopen(req, timeout=60)
+                r = urllib.request.urlopen(req, timeout=120)
                 result = json.loads(r.read().decode())
                 text = result['output']['choices'][0]['message']['content']
                 return '【图片：' + filename + '】\n' + text
@@ -334,7 +334,7 @@ def parse_file(data):
                     data=ws_data,
                     headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
                 )
-                r2 = urllib.request.urlopen(ws_req, timeout=60)
+                r2 = urllib.request.urlopen(ws_req, timeout=120)
                 raw2 = r2.read()
                 try:
                     result2 = json.loads(raw2.decode('utf-8'))
@@ -567,7 +567,7 @@ def make_handler():
                             headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
                         )
                         try:
-                            r = urllib.request.urlopen(req, timeout=60)
+                            r = urllib.request.urlopen(req, timeout=120)
                             result = json.loads(r.read().decode())
                             reply = result['choices'][0]['message']['content']
                             resp = json.dumps({'code': 0, 'data': reply})
@@ -596,7 +596,7 @@ def make_handler():
                             headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
                         )
                         try:
-                            r = urllib.request.urlopen(req, timeout=60)
+                            r = urllib.request.urlopen(req, timeout=120)
                             result = json.loads(r.read().decode())
                             reply = result['output']['choices'][0]['message']['content']
                             resp = json.dumps({'code': 0, 'data': reply})
@@ -670,7 +670,7 @@ def make_handler():
                             headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
                         )
                         try:
-                            r = urllib.request.urlopen(req, timeout=60)
+                            r = urllib.request.urlopen(req, timeout=120)
                             result = json.loads(r.read().decode())
                             text = result['output']['choices'][0]['message']['content']
                             # Step 2: Detect if table or text
