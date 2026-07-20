@@ -295,7 +295,7 @@ def parse_file(data):
                 }            # close input{}
             }).encode()
             req = urllib.request.Request(
-                'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+                'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
                 data=ocr_data,
                 headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
             )
@@ -552,7 +552,7 @@ def make_handler():
                             }
                         }).encode()
                         req = urllib.request.Request(
-                            'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+                            'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
                             data=vision_data,
                             headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
                         )
@@ -626,7 +626,7 @@ def make_handler():
                             }              # close input{}
                         }).encode()
                         req = urllib.request.Request(
-                            'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+                            'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
                             data=ocr_data,
                             headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
                         )
@@ -677,7 +677,8 @@ def make_handler():
                                 resp = json.dumps({'code': 0, 'url': '/dl/' + fid, 'detected': 'text', 'ocrText': text[:5000]})
                                 print(f'Handwriting: detected as text, {len(text)} chars')
                         except urllib.error.HTTPError as e:
-                            resp = json.dumps({'code': -1, 'error': 'API\u9519\u8bef: ' + e.read().decode()[:200]})
+                            body = e.read().decode()[:300]
+                            resp = json.dumps({'code': -1, 'error': '\u8bc6\u522b\u5931\u8d25 (' + str(e.code) + '): ' + body})
                         except Exception as e:
                             resp = json.dumps({'code': -1, 'error': str(e)[:200]})
                 else:
