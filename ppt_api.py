@@ -285,14 +285,15 @@ def parse_file(data):
                 return f'\u3010\u56fe\u7247\uff1a{filename}\u3011\n\uff08\u56fe\u7247\u6587\u5b57\u8bc6\u522b\u672a\u914d\u7f6e\uff0c\u9700\u8bbe\u7f6eAI_API_KEY\uff09'
             import urllib.request, urllib.error, base64
             img_b64 = base64.b64encode(raw).decode('ascii')
+            # First try old DashScope format (works with sk- keys)
             ocr_data = json.dumps({
                 'model': 'qwen3-vl-flash',
                 'input': {
                     'messages': [{'role': 'user', 'content': [
                         {'image': f'data:image/jpeg;base64,{img_b64}'},
-                        {'text': '\u8bf7\u63d0\u53d6\u8fd9\u5f20\u56fe\u7247\u4e2d\u7684\u6240\u6709\u6587\u5b57\u5185\u5bb9\uff0c\u76f4\u63a5\u8f93\u51fa\u6587\u5b57\uff0c\u4e0d\u8981\u989d\u5916\u8bf4\u660e'}
-                    ]}]       # close content[], msg{}, msg_array[]
-                }            # close input{}
+                        {'text': '请提取这张图片中的所有文字内容，直接输出文字，不要额外说明'}
+                    ]}]
+                }
             }).encode()
             req = urllib.request.Request(
                 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
@@ -302,10 +303,30 @@ def parse_file(data):
             try:
                 r = urllib.request.urlopen(req, timeout=60)
                 result = json.loads(r.read().decode())
-                text = result['choices'][0]['message']['content']
-                return f'\u3010\u56fe\u7247\uff1a{filename}\u3011\n{text}'
+                text = result['output']['choices'][0]['message']['content']
+                return '【图片：' + filename + '】\n' + text
+            except Exception:
+                pass  # fallback to workspace URL below
+            # Fallback: workspace-specific URL (sk-ws- keys)
+            ws_data = json.dumps({
+                'model': 'qwen3-vl-flash',
+                'messages': [{'role': 'user', 'content': [
+                    {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{img_b64}'}},
+                    {'type': 'text', 'text': '请提取这张图片中的所有文字内容，直接输出文字，不要额外说明'}
+                ]}]
+            }).encode()
+            ws_req = urllib.request.Request(
+                'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
+                data=ws_data,
+                headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
+            )
+            try:
+                r2 = urllib.request.urlopen(ws_req, timeout=60)
+                result2 = json.loads(r2.read().decode())
+                text2 = result2['choices'][0]['message']['content']
+                return '【图片：' + filename + '】\n' + text2
             except Exception as e:
-                return f'\u3010\u56fe\u7247\uff1a{filename}\u3011\n\uff08OCR\u8bc6\u522b\u5931\u8d25\uff1a{str(e)[:200]}\uff09'
+                return '【图片：' + filename + '】\n（OCR识别失败：' + str(e)[:200] + '）'
         elif ext == 'pdf':
             import pdfplumber
             import io
