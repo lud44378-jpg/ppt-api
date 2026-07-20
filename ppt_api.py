@@ -295,7 +295,7 @@ def parse_file(data):
                 }            # close input{}
             }).encode()
             req = urllib.request.Request(
-                'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
+                'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
                 data=ocr_data,
                 headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
             )
@@ -544,20 +544,22 @@ def make_handler():
                         prompt = body.get('prompt', '请描述这张图片')
                         vision_data = json.dumps({
                             'model': 'qwen3-vl-flash',
-                            'messages': [{'role': 'user', 'content': [
-                                {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}},
-                                {'type': 'text', 'text': prompt}
-                            ]}]
+                            'input': {
+                                'messages': [{'role': 'user', 'content': [
+                                    {'image': f'data:image/jpeg;base64,{image_b64}'},
+                                    {'text': prompt}
+                                ]}]
+                            }
                         }).encode()
                         req = urllib.request.Request(
-                            'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
+                            'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
                             data=vision_data,
                             headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
                         )
                         try:
                             r = urllib.request.urlopen(req, timeout=60)
                             result = json.loads(r.read().decode())
-                            reply = result['choices'][0]['message']['content']
+                            reply = result['output']['choices'][0]['message']['content']
                             resp = json.dumps({'code': 0, 'data': reply})
                         except Exception as e:
                             resp = json.dumps({'code': -1, 'error': '识别失败: ' + str(e)[:200]})
@@ -624,14 +626,14 @@ def make_handler():
                             }              # close input{}
                         }).encode()
                         req = urllib.request.Request(
-                            'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
+                            'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
                             data=ocr_data,
                             headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
                         )
                         try:
                             r = urllib.request.urlopen(req, timeout=60)
                             result = json.loads(r.read().decode())
-                            text = result['choices'][0]['message']['content']
+                            text = result['output']['choices'][0]['message']['content']
                             # Step 2: Detect if table or text
                             detect_data = json.dumps({
                                 'model': 'qwen-turbo',
