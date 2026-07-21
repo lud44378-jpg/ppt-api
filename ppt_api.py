@@ -140,6 +140,18 @@ def gen(data):
             if item:
                 clean_content.append(item)
         source['content'] = clean_content
+    # 模型偶尔会漏掉配图标记。班会 PPT 默认补足两张概念插图，避免生成纯文字页。
+    # 封面和结束页不放图，优先选择有正文要点的中间页。
+    target_images = 2 if len(slides) >= 5 else 1
+    if len(image_requests) < target_images:
+        for source in slides[1:-1]:
+            if len(image_requests) >= target_images:
+                break
+            if source.get('_image_prompt') or not source.get('content'):
+                continue
+            source['_image_mode'] = '生图'
+            source['_image_prompt'] = str(source.get('title', '')) + '，' + '；'.join(str(x) for x in source['content'][:2])
+            image_requests.append(source)
     if len(image_requests) > 2:
         raise RuntimeError('PPT 插图数量超过 2 张，请减少插图标记后重试')
     image_key = os.environ.get('AI_API_KEY', '').strip()
