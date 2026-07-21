@@ -176,13 +176,33 @@ def gen(data):
     for source in image_requests:
         if not image_key:
             raise RuntimeError('PPT 需要插图，但 Railway 未配置 AI_API_KEY')
-        if source.get('_image_mode') == '搜图':
-            image_url = search_image_url(source['_image_prompt'], image_key)
-        else:
-            image_url = generate_image_url(source['_image_prompt'], image_key)
         image_path = os.path.join(tempfile.mkdtemp(prefix='ppt_img_'), 'image.png')
-        urllib.request.urlretrieve(image_url, image_path)
-        source['_image_path'] = image_path
+        try:
+            if source.get('_image_mode') == '搜图':
+                image_url = search_image_url(source['_image_prompt'], image_key)
+            else:
+                image_url = generate_image_url(source['_image_prompt'], image_key)
+            # 不少新闻/图片站会拒绝无 User-Agent 的服务器下载。
+            image_request = urllib.request.Request(image_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(image_request, timeout=60) as image_response, open(image_path, 'wb') as image_file:
+                image_file.write(image_response.read())
+            source['_image_path'] = image_path
+        except Exception as image_error:
+            # 搜到的外站图片常有防盗链；改用无文字 AI 插图，不能因此丢掉整份课件。
+            if source.get('_image_mode') == '搜图':
+                try:
+                    image_url = generate_image_url(source['_image_prompt'], image_key)
+                    image_request = urllib.request.Request(image_url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(image_request, timeout=60) as image_response, open(image_path, 'wb') as image_file:
+                        image_file.write(image_response.read())
+                    source['_image_path'] = image_path
+                    print('[PPT API] search image unavailable; used AI illustration instead:', str(image_error)[:120])
+                    continue
+                except Exception as fallback_error:
+                    print('[PPT API] image skipped after search and AI fallback failed:', str(fallback_error)[:120])
+            else:
+                print('[PPT API] AI image skipped:', str(image_error)[:120])
+            source.pop('_image_path', None)
     slides = fit_slides(slides); n = len(slides)
 
     for idx, s in enumerate(slides):
