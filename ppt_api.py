@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """师助AI - PPT生成 API (部署到 Railway / Render)"""
-import os, json, io, base64, http.server, uuid, tempfile, urllib.request, urllib.error
+import os, json, io, base64, http.server, uuid, tempfile, urllib.request, urllib.error, traceback
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
@@ -833,6 +833,10 @@ def make_handler():
                 self.end_headers()
                 self.wfile.write(resp.encode())
             except Exception as e:
+                # Railway 的请求概览只会显示 500；完整堆栈必须写入标准输出，
+                # 否则无法区分 API Key、模型权限、接口返回或文件内容错误。
+                print('[PPT API] request failed:', repr(e), flush=True)
+                traceback.print_exc()
                 self.send_response(500)
                 self.send_header('Content-Type', 'application/json')
                 self._set_cors()
