@@ -520,15 +520,21 @@ def make_handler():
             if self.path.startswith('/dl/'):
                 file_id = self.path.split('/')[-1]
                 for f in os.listdir(DL_DIR):
-                    if f.endswith(file_id):
+                    if f == file_id or f.startswith(file_id + '.'):
                         fpath = os.path.join(DL_DIR, f)
                         try:
                             with open(fpath, 'rb') as fh:
                                 data = fh.read()
                             os.remove(fpath)
+                            ext = f.rsplit('.', 1)[-1].lower() if '.' in f else 'bin'
+                            content_types = {
+                                'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+                                'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                                'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                            }
                             self.send_response(200)
-                            self.send_header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-                            self.send_header('Content-Disposition', 'attachment; filename="seat.xlsx"')
+                            self.send_header('Content-Type', content_types.get(ext, 'application/octet-stream'))
+                            self.send_header('Content-Disposition', 'attachment; filename="szhuAI.' + ext + '"')
                             self._set_cors()
                             self.end_headers()
                             self.wfile.write(data)
@@ -565,7 +571,7 @@ def make_handler():
                     wb.save(buf)
                     # Save to temp file and return download URL
                     fid = str(uuid.uuid4())
-                    fpath = os.path.join(DL_DIR, fid)
+                    fpath = os.path.join(DL_DIR, fid + '.xlsx')
                     with open(fpath, 'wb') as fh:
                         fh.write(buf.getvalue())
                     resp = json.dumps({'code': 0, 'url': '/dl/' + fid})
@@ -592,7 +598,7 @@ def make_handler():
                     wb.save(buf)
                     # Save to temp file and return download URL
                     fid = str(uuid.uuid4())
-                    fpath = os.path.join(DL_DIR, fid)
+                    fpath = os.path.join(DL_DIR, fid + '.xlsx')
                     with open(fpath, 'wb') as fh:
                         fh.write(buf.getvalue())
                     resp = json.dumps({'code': 0, 'url': '/dl/' + fid})
@@ -793,7 +799,7 @@ def make_handler():
                                 buf = io.BytesIO()
                                 wb.save(buf)
                                 fid = str(uuid.uuid4())
-                                fpath = os.path.join(DL_DIR, fid)
+                                fpath = os.path.join(DL_DIR, fid + '.xlsx')
                                 with open(fpath, 'wb') as fh: fh.write(buf.getvalue())
                                 resp = json.dumps({'code': 0, 'url': '/dl/' + fid, 'detected': 'table', 'ocrText': text[:5000]})
                                 print(f'Handwriting: detected as table, {len(lines)} rows')
@@ -802,7 +808,7 @@ def make_handler():
                                 w_data = {'title': '\u624b\u5199\u6587\u6863', 'content': text}
                                 docx_bytes = gen_docx(w_data)
                                 fid = str(uuid.uuid4())
-                                fpath = os.path.join(DL_DIR, fid)
+                                fpath = os.path.join(DL_DIR, fid + '.docx')
                                 with open(fpath, 'wb') as fh: fh.write(docx_bytes)
                                 resp = json.dumps({'code': 0, 'url': '/dl/' + fid, 'detected': 'text', 'ocrText': text[:5000]})
                                 print(f'Handwriting: detected as text, {len(text)} chars')
@@ -815,7 +821,7 @@ def make_handler():
                     print(f'Generating PPT: {body.get("title","")}')
                     pptx_bytes = gen(body)
                     fid = str(uuid.uuid4())
-                    fpath = os.path.join(DL_DIR, fid)
+                    fpath = os.path.join(DL_DIR, fid + '.pptx')
                     with open(fpath, 'wb') as fh:
                         fh.write(pptx_bytes)
                     resp = json.dumps({'code': 0, 'url': '/dl/' + fid})
