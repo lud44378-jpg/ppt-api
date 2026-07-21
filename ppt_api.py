@@ -8,7 +8,7 @@ from pptx.enum.text import PP_ALIGN
 from pptx.enum.shapes import MSO_SHAPE
 
 DL_DIR = tempfile.mkdtemp(prefix="seat_dl_")
-PPT_PIPELINE_VERSION = 'research-v7-debug'
+PPT_PIPELINE_VERSION = 'research-v8-trace'
 
 THEME = {
     'exam':    ('#1A237E', '#2B579A', '#E53935', '#E8EAF6'),
@@ -223,7 +223,7 @@ def build_ppt_deck(body, api_key):
     if topic_is_academic and subject:
         user_context += '这是与学习有关的班会，可自然结合%s学科的学习情境，但不得生硬类比。' % subject
     extra = str(body.get('userDetail') or '').strip()[:1200]
-    script_prompt = '''你是一位有真实课堂经验的中国班主任。请只根据下面的真实检索来源，为“%s”写一篇自然、具体、可直接讲给学生听的班会讲述稿。
+    script_prompt = '''请只根据下面的真实检索来源，为“%s”写一篇自然、具体、可直接讲给学生听的班会讲述稿。
 
 %s
 真实检索来源：
@@ -231,9 +231,9 @@ def build_ppt_deck(body, api_key):
 
 教师补充要求：%s
 
-写作要求：先从贴近学生的情境、问题或材料切入，再解释为什么值得重视，最后自然过渡到学生能做什么。允许完整段落，不要写 PPT、不要列提纲、不要用套话凑篇幅。没有来源支撑的日期、地点、人物、事故、统计或政策不得写；如果资料不足，请老实用概括性解释。%s。''' % (topic, user_context, '\n'.join(source_lines), extra or '无', {'短':'约 500-800 字','中':'约 800-1300 字','长':'约 1300-1900 字'}.get(detail, '约 800-1300 字'))
+写作要求：先从贴近学生的情境、问题或材料切入，再解释为什么值得重视，最后自然过渡到学生能做什么。允许完整段落，不要写 PPT、不要列提纲、不要用套话凑篇幅。没有来源支撑的日期、地点、人物、事故、统计或政策不得写；如果资料不足，请老实用概括性解释。不得假装是该校教师，不得编造“我上周巡校”、班级往事、学生原话、学校已安排活动等真实校内经历；需要情境时，只能写明确的“假如/例如”情境。%s。''' % (topic, user_context, '\n'.join(source_lines), extra or '无', {'短':'约 500-800 字','中':'约 800-1300 字','长':'约 1300-1900 字'}.get(detail, '约 800-1300 字'))
     lecture_script = _qwen_reply(api_key, [
-        {'role': 'system', 'content': '优先把事情讲清楚，再考虑结构；不能核验的事实绝不补写。'},
+        {'role': 'system', 'content': '优先把事情讲清楚，再考虑结构；不能核验的事实绝不补写。不要冒充教师或编造具体校内经历。'},
         {'role': 'user', 'content': script_prompt},
     ], temperature=0.55, timeout=45)
     trace('02_lecture_script', lecture_script)
@@ -252,10 +252,15 @@ def build_ppt_deck(body, api_key):
 2. 页面顺序自然，不用固定模板；同一件事不要拆成“续页”。
 3. 可以加入贴近学生的讨论题、情境和行动建议，但不得新增讲述稿里没有的具体事实。
 4. 让内容足够丰富，达到上述篇幅，但不要用重复句凑页。''' % (topic, lecture_script, length_hint)
-    raw = _qwen_reply(api_key, [
-        {'role': 'system', 'content': '先把内容讲丰富、讲明白；Markdown 只是轻量分页标记，不要为了格式压缩内容。'},
-        {'role': 'user', 'content': outline_prompt},
-    ], temperature=0.55, timeout=45)
+    trace('03_outline_request', {'lecture_chars': len(lecture_script), 'detail': detail, 'length_hint': length_hint})
+    try:
+        raw = _qwen_reply(api_key, [
+            {'role': 'system', 'content': '先把内容讲丰富、讲明白；Markdown 只是轻量分页标记，不要为了格式压缩内容。'},
+            {'role': 'user', 'content': outline_prompt},
+        ], temperature=0.55, timeout=45)
+    except Exception as e:
+        trace('03_outline_error', {'type': type(e).__name__, 'message': str(e)[:1000]})
+        raise RuntimeError('PPT 大纲生成失败：' + str(e)[:500]) from e
     trace('03_markdown_outline', raw)
     subtitle, outline_slides = _outline_to_slides(raw)
     trace('04_outline_parsed', {'subtitle': subtitle, 'slides': outline_slides})
@@ -1241,6 +1246,10 @@ def make_handler():
                 self.end_headers()
                 self.wfile.write(resp.encode())
             except Exception as e:
+                # 线上 500 必须留下完整栈，才能区分研究、讲述稿、大纲、图片或渲染哪个阶段失败。
+                import traceback
+                print('[PPT API] request failed:', repr(e))
+                traceback.print_exc()
                 self.send_response(500)
                 self.send_header('Content-Type', 'application/json')
                 self._set_cors()
