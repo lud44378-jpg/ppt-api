@@ -155,7 +155,23 @@ def gen(data):
             source['_image_prompt'] = str(source.get('title', '')) + '，' + '；'.join(str(x) for x in source['content'][:2])
             image_requests.append(source)
     if len(image_requests) > 3:
-        raise RuntimeError('PPT 插图数量超过 3 张，请减少插图标记后重试')
+        # 故事板可能给多页标注配图；不应因此放弃整份PPT。
+        # 优先保留真实搜图和案例/事实/情境页，其他页面自然回退为纯文字版。
+        priority = {'case': 0, 'fact': 1, 'scenario': 2, 'steps': 3, 'compare': 4}
+        ranked = sorted(
+            enumerate(image_requests),
+            key=lambda pair: (
+                0 if pair[1].get('_image_mode') == '搜图' else 1,
+                priority.get(str(pair[1].get('type', '')).lower(), 5),
+                pair[0],
+            )
+        )
+        selected = {id(source) for _, source in ranked[:3]}
+        for source in image_requests:
+            if id(source) not in selected:
+                source.pop('_image_mode', None)
+                source.pop('_image_prompt', None)
+        image_requests = [source for _, source in ranked[:3]]
     image_key = os.environ.get('AI_API_KEY', '').strip()
     for source in image_requests:
         if not image_key:
