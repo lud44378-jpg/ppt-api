@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """师助AI - PPT生成 API (部署到 Railway / Render)"""
-import os, json, io, base64, http.server, uuid, tempfile, urllib.request, urllib.error
+import os, json, io, base64, http.server, uuid, tempfile, urllib.request, urllib.error, urllib.parse
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
@@ -8,7 +8,7 @@ from pptx.enum.text import PP_ALIGN
 from pptx.enum.shapes import MSO_SHAPE
 
 DL_DIR = tempfile.mkdtemp(prefix="seat_dl_")
-PPT_PIPELINE_VERSION = 'research-v3'
+PPT_PIPELINE_VERSION = 'research-v7-debug'
 
 THEME = {
     'exam':    ('#1A237E', '#2B579A', '#E53935', '#E8EAF6'),
@@ -119,8 +119,21 @@ def build_ppt_research(topic, api_key, detail='中'):
                 'url': url,
                 'excerpt': str(source.get('snippet', source.get('content', ''))).strip()[:500],
             })
+    def source_score(source):
+        domain = urllib.parse.urlparse(source['url']).netloc.lower()
+        title = source['title']
+        if domain.endswith('.gov.cn') or domain.endswith('.edu.cn'):
+            return 100
+        if any(name in domain for name in ('news.cn', 'xinhuanet.com', 'people.com.cn', 'cctv.com', 'chinanews.com')):
+            return 75
+        if any(name in title for name in ('教育部', '应急管理部', '国家', '中国教育报', '新华社', '人民日报')):
+            return 65
+        return 10
+    real_sources.sort(key=source_score, reverse=True)
     if len(real_sources) < 2:
         raise RuntimeError('联网研究未获得至少2个可核验来源')
+    if source_score(real_sources[0]) < 65:
+        raise RuntimeError('联网研究未找到可信官方或权威来源，已停止生成')
     return {
         'research_note': str(raw).strip()[:3000],
         'sources': real_sources[:4],
@@ -154,102 +167,130 @@ def _qwen_reply(api_key, messages, temperature=0.4, timeout=45):
         raise RuntimeError('阿里模型未返回内容')
     return str(reply).strip()
 
+def _outline_to_slides(outline):
+    """把自由 Markdown 大纲转成页面；模型只负责内容，程序才负责结构。"""
+    import re
+    slides, current = [], None
+    subtitle = ''
+    for raw_line in str(outline or '').splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith('# ') and not subtitle:
+            subtitle = line[2:].strip()
+            continue
+        if re.match(r'^#{2,3}\s+', line):
+            if current and current['content']:
+                slides.append(current)
+            current = {'title': re.sub(r'^#{2,3}\s+', '', line).strip(), 'content': []}
+            continue
+        if current:
+            line = re.sub(r'^[-*•▪]\s*', '', line)
+            line = re.sub(r'^\d+[、.．]\s*', '', line)
+            if line:
+                current['content'].append(line)
+    if current and current['content']:
+        slides.append(current)
+    return subtitle, slides
+
 def build_ppt_deck(body, api_key):
     """PPT 的完整可信链路：真实来源 → 受限故事板 → 后端校验。"""
     topic = str(body.get('topic') or body.get('title') or '').strip()
     detail = str(body.get('detail') or body.get('wordCount') or '中')
+    debug = {}
+    def trace(stage, value):
+        if body.get('debug'):
+            debug[stage] = value
+            print('[PPT TRACE] ' + stage + ': ' + json.dumps(value, ensure_ascii=False)[:12000])
     research = build_ppt_research(topic, api_key, detail)
     sources = research['sources']
+    trace('01_research_sources', sources)
+    trace('01_research_note', research.get('research_note', ''))
     source_lines = []
     for i, source in enumerate(sources, 1):
         excerpt = source.get('excerpt') or '检索结果未提供摘要，正文不得扩写具体数字或个案细节。'
         source_lines.append('S%s｜%s｜%s｜%s' % (i, source['title'], source['url'], excerpt))
     length_hint = {
-        '短': '4-6页（含封面、来源和结尾），只保留一条完整主线。',
-        '中': '5-8页（含封面、来源和结尾），自然展开，不为凑页拆分。',
-        '长': '7-11页（含封面、来源和结尾），可增加讨论或练习，但不重复。',
-    }.get(detail, '5-8页（含封面、来源和结尾），由材料决定，不为凑页。')
-    user_context = '适用对象：%s%s。' % (
-        (str(body.get('grade') or '').strip() + '学生') if body.get('grade') else '中小学生',
-        ('；学科/场景：' + str(body.get('subject')).strip()) if body.get('subject') else ''
-    )
-    script_prompt = '''你是一位有真实课堂经验的中国教师。请只根据下面的真实检索来源，为“%s”写一篇自然、具体、可直接讲给学生听的课堂讲述稿。
+        '短': '约 6-8 页（含封面、来源和结尾），保留完整主线。',
+        '中': '约 8-12 页（含封面、来源和结尾），内容可充分展开，但不重复凑页。',
+        '长': '约 12-16 页（含封面、来源和结尾），可加入讨论、练习、反思或延伸。',
+    }.get(detail, '约 8-12 页（含封面、来源和结尾），由材料自然决定。')
+    grade = str(body.get('grade') or '').strip()
+    subject = str(body.get('subject') or '').strip()
+    academic_words = ('考试', '期中', '期末', '复习', '学习', '学法', '动员', '成绩', '备考', '中考', '高考', '学科', '阅读', '数学', '语文', '英语')
+    topic_is_academic = any(word in topic for word in academic_words)
+    user_context = '适用对象：%s。' % ((grade + '学生') if grade else '中小学生')
+    if topic_is_academic and subject:
+        user_context += '这是与学习有关的班会，可自然结合%s学科的学习情境，但不得生硬类比。' % subject
+    extra = str(body.get('userDetail') or '').strip()[:1200]
+    script_prompt = '''你是一位有真实课堂经验的中国班主任。请只根据下面的真实检索来源，为“%s”写一篇自然、具体、可直接讲给学生听的班会讲述稿。
 
 %s
 真实检索来源：
 %s
 
-写作要求：先从贴近学生的情境、问题或材料切入，再解释为什么值得重视，最后自然过渡到学生能做什么。允许完整段落，不要写 PPT、不要列提纲、不要用套话凑篇幅。没有来源支撑的日期、地点、人物、事故、统计或政策不得写；如果资料不足，请老实用概括性解释。约 350-650 字。''' % (topic, user_context, '\n'.join(source_lines))
+教师补充要求：%s
+
+写作要求：先从贴近学生的情境、问题或材料切入，再解释为什么值得重视，最后自然过渡到学生能做什么。允许完整段落，不要写 PPT、不要列提纲、不要用套话凑篇幅。没有来源支撑的日期、地点、人物、事故、统计或政策不得写；如果资料不足，请老实用概括性解释。%s。''' % (topic, user_context, '\n'.join(source_lines), extra or '无', {'短':'约 500-800 字','中':'约 800-1300 字','长':'约 1300-1900 字'}.get(detail, '约 800-1300 字'))
     lecture_script = _qwen_reply(api_key, [
         {'role': 'system', 'content': '优先把事情讲清楚，再考虑结构；不能核验的事实绝不补写。'},
         {'role': 'user', 'content': script_prompt},
     ], temperature=0.55, timeout=45)
-    prompt = '''请把下面这篇已经写好的课堂讲述稿拆成 PPT 中间内容页。不要改写成口号，不要为了页数把一句话拆开；保留它的叙事、解释和行动之间的过渡。
+    trace('02_lecture_script', lecture_script)
+    outline_prompt = '''把下面的班会讲述稿整理为一份内容丰富、可以直接用于 PPT 排版的 Markdown 详细大纲。
 
 主题：%s
 讲述稿：
 %s
 
-真实检索来源（仅用于为页面标记出处）：
-%s
-
 篇幅：%s
-输出严格 JSON，格式：
-{"title":"","subtitle":"","slides":[{"type":"narrative|explain|steps|scenario|action","title":"","content":[""],"source_ids":["S1"],"image_query":"可选：只在真实新闻/实物/场景照片确有助理解时填写中文搜图词"}]}
 
-规则：
-1. 只有事实性页面需要 source_ids；课堂讨论和纯过渡页可不标。
-2. 不得新增讲述稿中没有的具体事实。narrative 是完整段落；steps 只在确实存在清晰步骤时使用。
-3. image_query 完全可选；只有一张真实、无文字、非摆拍图片能帮助理解本页时才填。不要为抽象口号、封面、结尾或每页凑图；不要填写新闻网页截图、海报、带标题图片或任何需要生图的描述。
-4. 只返回中间内容页；封面、真实来源页和结尾页由程序生成。不要输出 URL、页码、编号、配图要求或重复口号。''' % (topic, lecture_script, '\n'.join(source_lines), length_hint)
+只使用下面格式：每一页都以“## 页面标题”开始，标题下面写本页完整正文或要点。不要输出 JSON、表格、页码、封面、资料来源页或结束页。
+
+要求：
+1. 保留讲述稿的细节和逻辑，不要压成口号；一页可以是一段完整叙述，也可以有 3-6 条有信息量的要点。
+2. 页面顺序自然，不用固定模板；同一件事不要拆成“续页”。
+3. 可以加入贴近学生的讨论题、情境和行动建议，但不得新增讲述稿里没有的具体事实。
+4. 让内容足够丰富，达到上述篇幅，但不要用重复句凑页。''' % (topic, lecture_script, length_hint)
     raw = _qwen_reply(api_key, [
-        {'role': 'system', 'content': '只负责拆页，优先保留原讲述稿的自然表达。'},
-        {'role': 'user', 'content': prompt},
-    ], temperature=0.25, timeout=45)
-    draft = _json_from_model(raw)
-    allowed = {'narrative', 'explain', 'steps', 'scenario', 'action'}
-    valid_ids = {'S' + str(i) for i in range(1, len(sources) + 1)}
+        {'role': 'system', 'content': '先把内容讲丰富、讲明白；Markdown 只是轻量分页标记，不要为了格式压缩内容。'},
+        {'role': 'user', 'content': outline_prompt},
+    ], temperature=0.55, timeout=45)
+    trace('03_markdown_outline', raw)
+    subtitle, outline_slides = _outline_to_slides(raw)
+    trace('04_outline_parsed', {'subtitle': subtitle, 'slides': outline_slides})
     slides = []
-    for item in draft.get('slides', []):
-        if not isinstance(item, dict):
-            continue
-        kind = str(item.get('type', 'explain')).lower()
+    for item in outline_slides:
+        title = str(item.get('title') or '').strip()[:30]
         content = [str(x).strip() for x in item.get('content', []) if str(x).strip()]
-        ids = [str(x) for x in item.get('source_ids', []) if str(x) in valid_ids]
-        if kind not in allowed or not content:
+        if not title or not content:
             continue
-        if kind != 'scenario' and not ids:
-            continue
-        if kind == 'narrative':
-            text = ''.join(content)
-            if len(text) < 60 or len(text) > 180:
-                continue
-            content = [text]
-        if kind == 'steps':
-            content = content[:6]
-            if len(content) < 2:
-                continue
+        joined = ''.join(content)
+        if any(word in title for word in ('想一想', '讨论', '问题', '互动', '判断')):
+            kind = 'scenario'
+        elif len(content) >= 3 and any(word in title for word in ('方法', '做到', '行动', '建议', '步骤', '准备', '怎样', '如何')):
+            kind = 'steps'
+        elif len(content) == 1 and len(joined) >= 70:
+            kind = 'narrative'
         else:
-            content = content[:5]
-        item = {
-            'type': kind,
-            'title': str(item.get('title') or '').strip()[:30],
-            'content': content,
-            'source_titles': [sources[int(x[1:]) - 1]['title'] for x in ids],
-            'image_query': str(item.get('image_query') or '').strip()[:120],
-        }
-        if item['title']:
-            slides.append(item)
+            kind = 'explain'
+        slides.append({'type': kind, 'title': title, 'content': content, 'source_titles': [], 'image_query': ''})
     if len(slides) < 2:
         raise RuntimeError('故事板未形成足够的可核验内容，已停止生成')
-    max_middle = {'短': 3, '中': 5, '长': 8}.get(detail, 5)
+    max_middle = {'短': 5, '中': 9, '长': 13}.get(detail, 9)
     slides = slides[:max_middle]
+    trace('05_render_slides_before_images', slides)
     # 图片必须是故事板主动选择的真实素材，不为凑图自动生图；搜图失败时保留纯文字页。
+    # 若故事板没有给出关键词，只为适合视觉说明的叙事/解释页补一个“主题 + 页面意图”的真实搜图词；
+    # 这不是强制配图，搜索失败仍然留白，避免无关的 AI 摆拍图。
+    for slide in slides:
+        if slide.get('type') in ('narrative', 'explain') and not slide.get('image_query'):
+            slide['image_query'] = (topic + ' ' + slide.get('title', '') + ' 中国中小学班会真实场景').strip()[:120]
     assets = []
     visual_candidates = [
         (index, slide) for index, slide in enumerate(slides)
         if slide.get('type') in ('narrative', 'explain') and slide.get('image_query')
-    ][:2]
+    ][:4]
     if visual_candidates:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         def find_visual(index, slide):
@@ -264,14 +305,18 @@ def build_ppt_deck(body, api_key):
                     slides[index]['visual'] = {'mode': 'asset', 'asset_id': asset_id}
                 except Exception as err:
                     print('[PPT API] optional research visual skipped:', str(err)[:120])
+                    if body.get('debug'):
+                        debug.setdefault('06_image_errors', []).append(str(err)[:300])
+    trace('06_image_assets', assets)
     deck = {
-        'title': str(draft.get('title') or topic)[:40],
+        'title': topic[:40],
         'theme': body.get('theme') or detect(topic),
-        'slides': ([{'type': 'cover', 'title': topic, 'content': [str(draft.get('subtitle') or '基于可核验资料整理')[:40]]}]
+        'slides': ([{'type': 'cover', 'title': topic, 'content': [str(subtitle or '基于可核验资料整理')[:40]]}]
                    + slides
-                   + [{'type': 'sources', 'title': '资料来源', 'content': [s['title'] for s in sources[:4]], 'source_urls': [s['url'] for s in sources[:4]]},
+                   + [{'type': 'sources', 'title': '资料来源', 'content': [(urllib.parse.urlparse(s['url']).netloc + '｜' + s['title'])[:80] for s in sources[:4]], 'source_urls': [s['url'] for s in sources[:4]]},
                       {'type': 'closing', 'title': '把安全与行动带回日常', 'content': ['课堂讨论后，请把今天学到的做法落实到具体场景。']}]),
         'assets': assets,
+        'debug': debug,
     }
     return deck
 
@@ -1009,11 +1054,18 @@ def make_handler():
                         fpath = os.path.join(DL_DIR, fid + '.pptx')
                         with open(fpath, 'wb') as fh:
                             fh.write(pptx_bytes)
+                        if body.get('debug'):
+                            print('[PPT TRACE] 07_render_result: ' + json.dumps({
+                                'slide_count': len(deck['slides']),
+                                'image_assets': len(deck['assets']),
+                                'pptx_bytes': len(pptx_bytes),
+                            }, ensure_ascii=False))
                         resp = json.dumps({
                             'code': 0,
                             'url': '/dl/' + fid,
                             'title': deck['title'],
                             'slides': deck['slides'],
+                            'debug': deck.get('debug') if body.get('debug') else None,
                         }, ensure_ascii=False)
                         print('[PPT API] built verified PPT:', deck['title'], len(deck['slides']))
                 elif doc_type == 'ppt-research':
