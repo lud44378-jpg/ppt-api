@@ -42,7 +42,7 @@ def generate_image_url(prompt, api_key):
         data=payload,
         headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
     )
-    result = json.loads(urllib.request.urlopen(req, timeout=120).read().decode('utf-8'))
+    result = json.loads(urllib.request.urlopen(req, timeout=45).read().decode('utf-8'))
     if result.get('code'):
         raise RuntimeError('阿里生图失败：' + result.get('message', result['code']))
     content = result.get('output', {}).get('choices', [{}])[0].get('message', {}).get('content', [])
@@ -51,7 +51,7 @@ def generate_image_url(prompt, api_key):
             return item['image']
     raise RuntimeError('阿里生图未返回图片地址')
 
-def search_image_url(query, api_key, timeout=120):
+def search_image_url(query, api_key, timeout=15):
     """使用阿里文搜图获取真实图片地址，适用于人物、事件、器材等事实性页面。"""
     payload = json.dumps({
         'model': 'qwen3.6-flash',
@@ -76,32 +76,43 @@ def search_image_url(query, api_key, timeout=120):
             continue
     raise RuntimeError('联网搜图未返回可下载图片')
 
-def build_ppt_research(topic, api_key):
+def build_ppt_research(topic, api_key, detail='中'):
     """阿里先完成事实检索、叙事建议和图片素材检索，供后续故事板使用。"""
     import re
+    depth_hint = {
+        '短': '精简研究：只找支撑一条完整教学主线的核心事实/案例和必要来源，不追求材料数量。',
+        '中': '标准研究：找能支撑案例、解释、做法和互动的材料，信息完整但不堆砌。',
+        '长': '详细研究：在完整主线基础上补充对比、延伸、练习或讨论材料。',
+    }.get(str(detail), '标准研究：找能支撑案例、解释、做法和互动的材料，信息完整但不堆砌。')
     prompt = '''你是中国中小学教师的备课研究员。请联网研究主题：%s。
+篇幅偏好：%s
 只输出 JSON，不要 Markdown，格式必须为：
 {
- "facts":["3-5条可核实的事实、案例或规范，每条含简短来源名"],
- "sources":["2-4个来源名称或机构"],
- "teaching_arc":["适合本主题的4-6步课堂叙事结构"],
+ "facts":["可核实的事实、案例或规范，每条含简短来源名与URL"],
+ "teaching_arc":["适合本主题的自然课堂叙事结构，不要求固定步数"],
+ "lecture_script":"一段180-350字的课堂讲述主线，先讲情境/案例或问题，再解释，再过渡到做法；只能使用联网资料中的事实",
  "image_queries":[{"query":"一条具体且适合教学PPT的中文搜图关键词","caption":"这张图用于说明什么"}]
 }
-不得编造姓名、数字、事故或来源。image_queries 最多3条；只给确有必要的真实事件、物件、地点或现象，不要泛泛搜索人物摆拍、课堂合影、游泳池合影或新闻网页截图。''' % topic
+不得编造姓名、数字、事故或来源；若找不到可核验URL，宁可不写该事实。image_queries 只在确有必要时给出，最多3条；不要为了凑数量给泛泛的人物摆拍、课堂合影、游泳池合影或新闻网页截图。''' % (topic, depth_hint)
     payload = json.dumps({
         'model': 'qwen-plus',
-        'messages': [{'role': 'user', 'content': prompt}],
-        'enable_search': True,
-        'search_options': {'forced_search': True},
-        'temperature': 0.2,
+        'input': {'messages': [{'role': 'user', 'content': prompt}]},
+        'parameters': {
+            'enable_search': True,
+            'search_options': {'forced_search': True, 'enable_source': True},
+            'result_format': 'message',
+            'temperature': 0.2,
+        },
     }).encode()
     req = urllib.request.Request(
-        'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
+        'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/text-generation/generation',
         data=payload,
         headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
     )
-    result = json.loads(urllib.request.urlopen(req, timeout=120).read().decode('utf-8'))
-    raw = result['choices'][0]['message']['content']
+    # 研究是生成的硬门槛，但不能在网络异常时让用户无止境等待。
+    result = json.loads(urllib.request.urlopen(req, timeout=45).read().decode('utf-8'))
+    output = result.get('output', {})
+    raw = output.get('choices', [{}])[0].get('message', {}).get('content', '')
     match = re.search(r'\{[\s\S]*\}', raw)
     if not match:
         raise RuntimeError('联网研究未返回结构化资料')
@@ -115,13 +126,30 @@ def build_ppt_research(topic, api_key):
     ]
     # 三张图片并行检索，不能让素材预取的耗时累加到数分钟。
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    # 来源必须来自阿里真实搜索结果，不能接受模型在 JSON 里自行编写的 URL。
+    real_sources = []
+    for source in output.get('search_info', {}).get('search_results', []):
+        url = str(source.get('url', '')).strip()
+        title = str(source.get('title', '')).strip()
+        if url.startswith(('https://', 'http://')) and title:
+            real_sources.append({
+                'title': title,
+                'url': url,
+                'excerpt': str(source.get('snippet', source.get('content', ''))).strip()[:500],
+            })
+    if len(real_sources) < 2:
+        raise RuntimeError('联网研究未获得至少2个可核验来源')
+    lecture_script = str(pack.get('lecture_script', '')).strip()
+    if len(lecture_script) < 80:
+        raise RuntimeError('联网研究未形成完整课堂讲述主线')
+
     assets = []
     def fetch_asset(item):
         query = str(item['query']).strip()
         return {
             'query': query,
             'caption': str(item.get('caption', query)).strip(),
-            'url': search_image_url(query, api_key, timeout=45),
+            'url': search_image_url(query, api_key, timeout=15),
         }
     with ThreadPoolExecutor(max_workers=min(3, len(candidates) or 1)) as pool:
         futures = [pool.submit(fetch_asset, item) for item in candidates]
@@ -134,8 +162,9 @@ def build_ppt_research(topic, api_key):
                 print('[PPT API] research image unavailable:', str(err)[:120])
     return {
         'facts': (pack.get('facts') or [])[:5],
-        'sources': (pack.get('sources') or [])[:4],
+        'sources': real_sources[:4],
         'teaching_arc': (pack.get('teaching_arc') or [])[:6],
+        'lecture_script': lecture_script[:1000],
         'assets': assets,
     }
 
@@ -216,19 +245,8 @@ def gen(data):
                 clean_content.append(item)
                 seen_items.add(normalized)
         source['content'] = clean_content
-    # 模型偶尔会漏掉配图标记。默认使用与主题一致的无文字插画；
-    # 泛化搜图很容易得到不相关的摆拍或海外素材，真实事件才由故事板明确指定搜图。
-    # 封面和结束页不放图，优先选择有正文要点的中间页。
-    target_images = 3 if len(slides) >= 6 else 2
-    if len(image_requests) < target_images:
-        for source in slides[1:-1]:
-            if len(image_requests) >= target_images:
-                break
-            if source.get('_image_prompt') or not source.get('content'):
-                continue
-            source['_image_mode'] = '生图'
-            source['_image_prompt'] = str(source.get('title', '')) + '，' + '；'.join(str(x) for x in source['content'][:2])
-            image_requests.append(source)
+    # 不为“看起来有图”而强行补图。只有研究素材包或故事板明确选择的画面才会进入 PPT，
+    # 这样避免与主题无关的摆拍图、以及带乱码文字的生图。
     if len(image_requests) > 3:
         # 故事板可能给多页标注配图；不应因此放弃整份PPT。
         # 优先保留真实搜图和案例/事实/情境页，其他页面自然回退为纯文字版。
@@ -261,22 +279,14 @@ def gen(data):
                 image_url = generate_image_url(source['_image_prompt'], image_key)
             # 不少新闻/图片站会拒绝无 User-Agent 的服务器下载。
             image_request = urllib.request.Request(image_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(image_request, timeout=60) as image_response, open(image_path, 'wb') as image_file:
+            with urllib.request.urlopen(image_request, timeout=15) as image_response, open(image_path, 'wb') as image_file:
                 image_file.write(image_response.read())
             source['_image_path'] = image_path
         except Exception as image_error:
-            # 搜到的外站图片常有防盗链；改用无文字 AI 插图，不能因此丢掉整份课件。
+            # 外站图片可能防盗链或暂时不可访问。跳过图片即可，不能为此让正文长时间等待，
+            # 更不能擅自改成可能含乱码文字的 AI 生图。
             if source.get('_image_mode') in ('搜图', '素材'):
-                try:
-                    image_url = generate_image_url(source['_image_prompt'], image_key)
-                    image_request = urllib.request.Request(image_url, headers={'User-Agent': 'Mozilla/5.0'})
-                    with urllib.request.urlopen(image_request, timeout=60) as image_response, open(image_path, 'wb') as image_file:
-                        image_file.write(image_response.read())
-                    source['_image_path'] = image_path
-                    print('[PPT API] search image unavailable; used AI illustration instead:', str(image_error)[:120])
-                    continue
-                except Exception as fallback_error:
-                    print('[PPT API] image skipped after search and AI fallback failed:', str(fallback_error)[:120])
+                print('[PPT API] research image skipped:', str(image_error)[:120])
             else:
                 print('[PPT API] AI image skipped:', str(image_error)[:120])
             source.pop('_image_path', None)
@@ -846,7 +856,7 @@ def make_handler():
                         resp = json.dumps({'code': -1, 'error': 'PPT联网研究未配置（需在Railway设置 AI_API_KEY）'})
                     else:
                         try:
-                            pack = build_ppt_research(body.get('topic', ''), api_key)
+                            pack = build_ppt_research(body.get('topic', ''), api_key, body.get('detail', '中'))
                             resp = json.dumps({'code': 0, 'data': pack}, ensure_ascii=False)
                         except Exception as e:
                             resp = json.dumps({'code': -1, 'error': 'PPT联网研究失败: ' + str(e)[:200]})
