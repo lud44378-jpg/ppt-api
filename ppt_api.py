@@ -8,7 +8,7 @@ from pptx.enum.text import PP_ALIGN
 from pptx.enum.shapes import MSO_SHAPE
 
 DL_DIR = tempfile.mkdtemp(prefix="seat_dl_")
-PPT_PIPELINE_VERSION = 'research-v2'
+PPT_PIPELINE_VERSION = 'research-v3'
 
 THEME = {
     'exam':    ('#1A237E', '#2B579A', '#E53935', '#E8EAF6'),
@@ -138,6 +138,22 @@ def _json_from_model(raw):
     except ValueError as err:
         raise RuntimeError('故事板 JSON 格式错误') from err
 
+def _qwen_reply(api_key, messages, temperature=0.4, timeout=45):
+    payload = json.dumps({
+        'model': 'qwen-plus', 'messages': messages, 'temperature': temperature,
+        'max_tokens': 4096, 'stream': False,
+    }).encode()
+    req = urllib.request.Request(
+        'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
+        data=payload,
+        headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
+    )
+    result = json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode('utf-8'))
+    reply = result.get('choices', [{}])[0].get('message', {}).get('content', '')
+    if not str(reply).strip():
+        raise RuntimeError('阿里模型未返回内容')
+    return str(reply).strip()
+
 def build_ppt_deck(body, api_key):
     """PPT 的完整可信链路：真实来源 → 受限故事板 → 后端校验。"""
     topic = str(body.get('topic') or body.get('title') or '').strip()
@@ -153,41 +169,43 @@ def build_ppt_deck(body, api_key):
         '中': '5-8页（含封面、来源和结尾），自然展开，不为凑页拆分。',
         '长': '7-11页（含封面、来源和结尾），可增加讨论或练习，但不重复。',
     }.get(detail, '5-8页（含封面、来源和结尾），由材料决定，不为凑页。')
-    prompt = '''你是严谨的中国中小学教师。请只根据下列“真实检索来源”制作主题为“%s”的课堂 PPT 故事板。
+    user_context = '适用对象：%s%s。' % (
+        (str(body.get('grade') or '').strip() + '学生') if body.get('grade') else '中小学生',
+        ('；学科/场景：' + str(body.get('subject')).strip()) if body.get('subject') else ''
+    )
+    script_prompt = '''你是一位有真实课堂经验的中国教师。请只根据下面的真实检索来源，为“%s”写一篇自然、具体、可直接讲给学生听的课堂讲述稿。
 
-真实检索来源（只有这些可作为客观事实依据）：
+%s
+真实检索来源：
 %s
 
-研究员提示（仅作选材参考，不可把其中未被来源支持的内容当事实）：
+写作要求：先从贴近学生的情境、问题或材料切入，再解释为什么值得重视，最后自然过渡到学生能做什么。允许完整段落，不要写 PPT、不要列提纲、不要用套话凑篇幅。没有来源支撑的日期、地点、人物、事故、统计或政策不得写；如果资料不足，请老实用概括性解释。约 350-650 字。''' % (topic, user_context, '\n'.join(source_lines))
+    lecture_script = _qwen_reply(api_key, [
+        {'role': 'system', 'content': '优先把事情讲清楚，再考虑结构；不能核验的事实绝不补写。'},
+        {'role': 'user', 'content': script_prompt},
+    ], temperature=0.55, timeout=45)
+    prompt = '''请把下面这篇已经写好的课堂讲述稿拆成 PPT 中间内容页。不要改写成口号，不要为了页数把一句话拆开；保留它的叙事、解释和行动之间的过渡。
+
+主题：%s
+讲述稿：
+%s
+
+真实检索来源（仅用于为页面标记出处）：
 %s
 
 篇幅：%s
 输出严格 JSON，格式：
-{"title":"","subtitle":"","slides":[{"type":"narrative|explain|steps|scenario|action","title":"","content":[""],"source_ids":["S1"]}]}
+{"title":"","subtitle":"","slides":[{"type":"narrative|explain|steps|scenario|action","title":"","content":[""],"source_ids":["S1"],"image_query":"可选：只在真实新闻/实物/场景照片确有助理解时填写中文搜图词"}]}
 
 规则：
-1. 先形成一条自然讲述主线：问题或情境 → 为什么 → 可以怎么做 → 课堂行动/讨论；主题不同可调整，绝不固定套模板。
-2. 不得虚构任何日期、地点、人物、事故、政策、统计数字或“教育部提示”。若来源摘要不包含细节，就用概括性表述，不得补细节。
-3. 每个 narrative/explain/steps/action 页必须有有效 source_ids；不确定的内容宁可不写。scenario 可以是课堂假设情境，不得伪装成真实事件。
-4. narrative 页必须是一段连贯的 80-150 字叙述；steps 页可有 3-6 项；其余页按内容决定，不把一句话拆成多页。
-5. 只返回中间内容页；封面、真实来源页和结尾页由程序生成。不要输出 URL、页码、编号、口号式重复语句，也不要安排配图。''' % (topic, '\n'.join(source_lines), research['research_note'], length_hint)
-    post_data = json.dumps({
-        'model': 'qwen-plus',
-        'messages': [
-            {'role': 'system', 'content': '你必须以提供的来源为边界。不能核验的事实一律删除。'},
-            {'role': 'user', 'content': prompt},
-        ],
-        'temperature': 0.15,
-        'max_tokens': 4096,
-        'stream': False,
-    }).encode()
-    req = urllib.request.Request(
-        'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
-        data=post_data,
-        headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
-    )
-    result = json.loads(urllib.request.urlopen(req, timeout=75).read().decode('utf-8'))
-    raw = result.get('choices', [{}])[0].get('message', {}).get('content', '')
+1. 只有事实性页面需要 source_ids；课堂讨论和纯过渡页可不标。
+2. 不得新增讲述稿中没有的具体事实。narrative 是完整段落；steps 只在确实存在清晰步骤时使用。
+3. image_query 完全可选；只有一张真实、无文字、非摆拍图片能帮助理解本页时才填。不要为抽象口号、封面、结尾或每页凑图；不要填写新闻网页截图、海报、带标题图片或任何需要生图的描述。
+4. 只返回中间内容页；封面、真实来源页和结尾页由程序生成。不要输出 URL、页码、编号、配图要求或重复口号。''' % (topic, lecture_script, '\n'.join(source_lines), length_hint)
+    raw = _qwen_reply(api_key, [
+        {'role': 'system', 'content': '只负责拆页，优先保留原讲述稿的自然表达。'},
+        {'role': 'user', 'content': prompt},
+    ], temperature=0.25, timeout=45)
     draft = _json_from_model(raw)
     allowed = {'narrative', 'explain', 'steps', 'scenario', 'action'}
     valid_ids = {'S' + str(i) for i in range(1, len(sources) + 1)}
@@ -218,6 +236,7 @@ def build_ppt_deck(body, api_key):
             'title': str(item.get('title') or '').strip()[:30],
             'content': content,
             'source_titles': [sources[int(x[1:]) - 1]['title'] for x in ids],
+            'image_query': str(item.get('image_query') or '').strip()[:120],
         }
         if item['title']:
             slides.append(item)
@@ -225,6 +244,26 @@ def build_ppt_deck(body, api_key):
         raise RuntimeError('故事板未形成足够的可核验内容，已停止生成')
     max_middle = {'短': 3, '中': 5, '长': 8}.get(detail, 5)
     slides = slides[:max_middle]
+    # 图片必须是故事板主动选择的真实素材，不为凑图自动生图；搜图失败时保留纯文字页。
+    assets = []
+    visual_candidates = [
+        (index, slide) for index, slide in enumerate(slides)
+        if slide.get('type') in ('narrative', 'explain') and slide.get('image_query')
+    ][:2]
+    if visual_candidates:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        def find_visual(index, slide):
+            return index, search_image_url(slide['image_query'], api_key, timeout=15)
+        with ThreadPoolExecutor(max_workers=len(visual_candidates)) as pool:
+            futures = [pool.submit(find_visual, index, slide) for index, slide in visual_candidates]
+            for future in as_completed(futures):
+                try:
+                    index, url = future.result()
+                    asset_id = 'A' + str(len(assets) + 1)
+                    assets.append({'id': asset_id, 'url': url, 'caption': slides[index]['image_query']})
+                    slides[index]['visual'] = {'mode': 'asset', 'asset_id': asset_id}
+                except Exception as err:
+                    print('[PPT API] optional research visual skipped:', str(err)[:120])
     deck = {
         'title': str(draft.get('title') or topic)[:40],
         'theme': body.get('theme') or detect(topic),
@@ -232,7 +271,7 @@ def build_ppt_deck(body, api_key):
                    + slides
                    + [{'type': 'sources', 'title': '资料来源', 'content': [s['title'] for s in sources[:4]], 'source_urls': [s['url'] for s in sources[:4]]},
                       {'type': 'closing', 'title': '把安全与行动带回日常', 'content': ['课堂讨论后，请把今天学到的做法落实到具体场景。']}]),
-        'assets': [],
+        'assets': assets,
     }
     return deck
 
@@ -248,8 +287,8 @@ def fit_slides(raw_slides):
             item = str(item).strip()
             if not item:
                 continue
-            # 案例页允许一段完整叙事，不把一个事件机械切成多条短句。
-            while kind != 'case' and len(item) > 42:
+            # 案例/叙事页允许完整段落，不把一个事件或讲述机械切成多条短句。
+            while kind not in ('case', 'narrative') and len(item) > 42:
                 cut = max(item.rfind('，', 0, 42), item.rfind('。', 0, 42), item.rfind('；', 0, 42), item.rfind('、', 0, 42))
                 cut = cut + 1 if cut >= 18 else 42
                 items.append(item[:cut])
@@ -259,7 +298,7 @@ def fit_slides(raw_slides):
         # 互动和步骤页需要留白；事实、案例、做法页可以承载更多信息。
         max_items = {
             'scenario': 3, 'steps': 6, 'compare': 6,
-            'fact': 6, 'case': 6, 'action': 6, 'sources': 4,
+            'fact': 6, 'case': 6, 'narrative': 1, 'action': 6, 'sources': 4,
         }.get(kind, 5)
         chunks = [items[i:i + max_items] for i in range(0, len(items), max_items)] or [[]]
         for chunk_index, chunk in enumerate(chunks):
@@ -397,14 +436,40 @@ def gen(data):
             title = slide.shapes.add_textbox(Inches(0.9), Inches(0.5), Inches(11.5), Inches(0.8))
             tp = title.text_frame.paragraphs[0]; tp.text = s.get('title', '')
             tp.font.size = Pt(30); tp.font.bold = True; tp.font.color.rgb = D
-            panel = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(1.05), Inches(1.65), Inches(11.1), Inches(3.85))
+            has_image = bool(s.get('_image_path'))
+            panel_x = Inches(5.05) if has_image else Inches(1.05)
+            panel_w = Inches(7.1) if has_image else Inches(11.1)
+            panel = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, panel_x, Inches(1.65), panel_w, Inches(3.85))
             panel.fill.solid(); panel.fill.fore_color.rgb = L; panel.line.fill.background()
             tf = panel.text_frame; tf.word_wrap = True
-            p = tf.paragraphs[0]; p.text = ''.join(items[:1]); p.font.size = Pt(20); p.font.color.rgb = T
+            p = tf.paragraphs[0]; p.text = ''.join(items[:1]); p.font.size = Pt(18 if has_image else 20); p.font.color.rgb = T
             p.space_after = Pt(10)
+            if has_image:
+                slide.shapes.add_picture(s['_image_path'], Inches(0.95), Inches(1.75), Inches(3.65), Inches(3.65))
             source_names = s.get('source_titles') or []
             if source_names:
                 foot = slide.shapes.add_textbox(Inches(1.15), Inches(5.75), Inches(10.8), Inches(0.35))
+                fp = foot.text_frame.paragraphs[0]; fp.text = '资料：' + '；'.join(source_names[:2])
+                fp.font.size = Pt(10); fp.font.color.rgb = P
+            continue
+        if kind == 'explain':
+            title = slide.shapes.add_textbox(Inches(0.85), Inches(0.5), Inches(11.5), Inches(0.8))
+            tp = title.text_frame.paragraphs[0]; tp.text = s.get('title', '')
+            tp.font.size = Pt(30); tp.font.bold = True; tp.font.color.rgb = D
+            has_image = bool(s.get('_image_path'))
+            panel_x = Inches(0.95)
+            panel_w = Inches(6.8) if has_image else Inches(11.2)
+            panel = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, panel_x, Inches(1.55), panel_w, Inches(4.35))
+            panel.fill.solid(); panel.fill.fore_color.rgb = L; panel.line.fill.background()
+            tf = panel.text_frame; tf.word_wrap = True
+            for i, item in enumerate(items[:5]):
+                p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+                p.text = item; p.font.size = Pt(18); p.font.color.rgb = T; p.space_after = Pt(12)
+            if has_image:
+                slide.shapes.add_picture(s['_image_path'], Inches(8.15), Inches(1.75), Inches(3.5), Inches(3.5))
+            source_names = s.get('source_titles') or []
+            if source_names:
+                foot = slide.shapes.add_textbox(Inches(1.05), Inches(6.05), Inches(10.8), Inches(0.3))
                 fp = foot.text_frame.paragraphs[0]; fp.text = '资料：' + '；'.join(source_names[:2])
                 fp.font.size = Pt(10); fp.font.color.rgb = P
             continue
