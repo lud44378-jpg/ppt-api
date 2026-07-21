@@ -496,7 +496,8 @@ def parse_file(data):
                 data=ocr_data,
                 headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
             )
-            response = urllib.request.urlopen(req, timeout=120)
+            # 截图 OCR 正常应在数十秒内完成；超时要返回明确错误，不能让小程序一直转圈。
+            response = urllib.request.urlopen(req, timeout=45)
             result = json.loads(response.read().decode('utf-8'))
             text = result['output']['choices'][0]['message']['content']
             if isinstance(text, list):
