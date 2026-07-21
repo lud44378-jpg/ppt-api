@@ -32,7 +32,7 @@ def detect(t):
 
 def generate_image_url(prompt, api_key):
     """调用阿里 Z-Image 同步文生图接口，返回临时图片 URL。"""
-    image_prompt = '教育教学PPT插图，无文字、无水印、构图简洁，适合放在16:9演示文稿右侧：' + prompt
+    image_prompt = '教育教学PPT插图，画面绝对不要任何文字、汉字、数字、字母、标志、海报或水印；构图简洁、主体清晰：' + prompt
     payload = json.dumps({
         'model': 'z-image-turbo',
         'input': {'messages': [{'role': 'user', 'content': [{'text': image_prompt}]}]}
@@ -94,7 +94,13 @@ def fit_slides(raw_slides):
                 item = item[cut:].lstrip('，。；、 ')
             if item:
                 items.append(item)
-        chunks = [items[i:i + 4] for i in range(0, len(items), 4)] or [[]]
+        kind = str(source.get('type', '')).lower()
+        # 互动和步骤页需要留白；事实、案例、做法页可以承载更多信息。
+        max_items = {
+            'scenario': 3, 'steps': 4, 'compare': 6,
+            'fact': 6, 'case': 6, 'action': 6, 'sources': 4,
+        }.get(kind, 5)
+        chunks = [items[i:i + max_items] for i in range(0, len(items), max_items)] or [[]]
         for chunk_index, chunk in enumerate(chunks):
             slide = dict(source)
             slide['content'] = chunk
@@ -105,7 +111,7 @@ def fit_slides(raw_slides):
     return fitted
 
 def gen(data):
-    th = THEME.get(detect(data.get('title','')), THEME['default'])
+    th = THEME.get(data.get('theme') or detect(data.get('title','')), THEME['default'])
     D = rgb(th[0]); P = rgb(th[1]); A = rgb(th[2]); L = rgb(th[3])
     W = RGBColor(0xFF,0xFF,0xFF); T = RGBColor(0x33,0x33,0x33)
     prs = Presentation(); prs.slide_width = Inches(13.333); prs.slide_height = Inches(7.5)
@@ -116,30 +122,40 @@ def gen(data):
     image_requests = []
     for source in slides:
         clean_content = []
+        seen_items = set()
+        visual = source.get('visual') if isinstance(source.get('visual'), dict) else {}
+        if visual.get('mode') in ('search', 'generate') and str(visual.get('prompt', '')).strip():
+            source['_image_mode'] = '搜图' if visual['mode'] == 'search' else '生图'
+            source['_image_prompt'] = str(visual['prompt']).strip()
+            image_requests.append(source)
         for item in source.get('content', []):
             match = re.search(r'\[(\u641c\u56fe|\u751f\u56fe|\u63d2\u56fe)\uff1a(.+?)\]', str(item))
-            if match:
+            if match and not source.get('_image_prompt'):
                 source['_image_mode'] = match.group(1)
                 source['_image_prompt'] = match.group(2).strip()
                 item = str(item).replace(match.group(0), '').strip()
                 image_requests.append(source)
-            if item:
+            # 模型常自行加编号，版式也会加编号；统一去除，避免“1. 1.”。
+            item = re.sub(r'^\s*(?:[0-9]+[、.．]|[一二三四五六七八九十]+、|[▪•\-])\s*', '', str(item)).strip()
+            normalized = re.sub(r'\s+', '', item)
+            if item and normalized not in seen_items:
                 clean_content.append(item)
+                seen_items.add(normalized)
         source['content'] = clean_content
-    # 模型偶尔会漏掉配图标记。班会 PPT 默认补足两张概念插图，避免生成纯文字页。
+    # 模型偶尔会漏掉配图标记。默认补足三张真实搜索图，避免整份PPT都是AI插画。
     # 封面和结束页不放图，优先选择有正文要点的中间页。
-    target_images = 2 if len(slides) >= 5 else 1
+    target_images = 3 if len(slides) >= 6 else 2
     if len(image_requests) < target_images:
         for source in slides[1:-1]:
             if len(image_requests) >= target_images:
                 break
             if source.get('_image_prompt') or not source.get('content'):
                 continue
-            source['_image_mode'] = '生图'
+            source['_image_mode'] = '搜图'
             source['_image_prompt'] = str(source.get('title', '')) + '，' + '；'.join(str(x) for x in source['content'][:2])
             image_requests.append(source)
-    if len(image_requests) > 2:
-        raise RuntimeError('PPT 插图数量超过 2 张，请减少插图标记后重试')
+    if len(image_requests) > 3:
+        raise RuntimeError('PPT 插图数量超过 3 张，请减少插图标记后重试')
     image_key = os.environ.get('AI_API_KEY', '').strip()
     for source in image_requests:
         if not image_key:
@@ -155,6 +171,12 @@ def gen(data):
 
     for idx, s in enumerate(slides):
         slide = prs.slides.add_slide(prs.slide_layouts[6])
+        # 除封面外统一页码，避免内容页出现重复或错乱编号。
+        if idx > 0:
+            footer = slide.shapes.add_textbox(Inches(11.8), Inches(7.03), Inches(1.0), Inches(0.25))
+            fp = footer.text_frame.paragraphs[0]
+            fp.text = f'{idx + 1} / {len(slides)}'
+            fp.font.size = Pt(9); fp.font.color.rgb = P; fp.alignment = PP_ALIGN.RIGHT
         if idx == 0:
             slide.background.fill.solid(); slide.background.fill.fore_color.rgb = D
             tb = slide.shapes.add_textbox(Inches(1.5), Inches(2.2), Inches(10), Inches(2))
@@ -177,6 +199,53 @@ def gen(data):
                 p2 = tf.add_paragraph(); p2.text = s['content'][0]; p2.font.size = Pt(22)
                 p2.font.color.rgb = A; p2.alignment = PP_ALIGN.CENTER; p2.space_before = Pt(16)
             continue
+        kind = str(s.get('type', '')).lower()
+        items = s.get('content', [])
+        # 故事板页面按教学目的渲染，避免所有内容页都是同一种项目符号列表。
+        if kind == 'scenario':
+            slide.background.fill.solid(); slide.background.fill.fore_color.rgb = L
+            q = slide.shapes.add_textbox(Inches(1.15), Inches(1.1), Inches(11.0), Inches(1.3))
+            qp = q.text_frame.paragraphs[0]; qp.text = s.get('title', '')
+            qp.font.size = Pt(34); qp.font.bold = True; qp.font.color.rgb = D; qp.alignment = PP_ALIGN.CENTER
+            panel = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(1.5), Inches(2.6), Inches(10.3), Inches(2.8))
+            panel.fill.solid(); panel.fill.fore_color.rgb = W; panel.line.color.rgb = A
+            tf = panel.text_frame; tf.word_wrap = True
+            for i, item in enumerate(items[:3]):
+                p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+                p.text = item; p.font.size = Pt(21); p.font.color.rgb = T; p.alignment = PP_ALIGN.CENTER
+                p.space_after = Pt(12)
+            continue
+        if kind == 'steps':
+            title = slide.shapes.add_textbox(Inches(0.8), Inches(0.5), Inches(11.8), Inches(0.8))
+            tp = title.text_frame.paragraphs[0]; tp.text = s.get('title', ''); tp.font.size = Pt(30); tp.font.bold = True; tp.font.color.rgb = D
+            count = min(max(len(items), 1), 4); width = 11.5 / count
+            for i, item in enumerate(items[:4]):
+                x = 0.9 + i * width
+                num = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(x + width / 2 - 0.28), Inches(1.55), Inches(0.56), Inches(0.56))
+                num.fill.solid(); num.fill.fore_color.rgb = A; num.line.fill.background()
+                np = num.text_frame.paragraphs[0]; np.text = str(i + 1); np.font.size = Pt(16); np.font.bold = True; np.font.color.rgb = W; np.alignment = PP_ALIGN.CENTER
+                card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(2.35), Inches(width - 0.28), Inches(2.15))
+                card.fill.solid(); card.fill.fore_color.rgb = L; card.line.fill.background()
+                cp = card.text_frame.paragraphs[0]; cp.text = item; cp.font.size = Pt(16); cp.font.color.rgb = D; cp.font.bold = True; cp.alignment = PP_ALIGN.CENTER
+            continue
+        if kind in ('compare', 'sources'):
+            title = slide.shapes.add_textbox(Inches(0.8), Inches(0.5), Inches(11.8), Inches(0.8))
+            tp = title.text_frame.paragraphs[0]; tp.text = s.get('title', ''); tp.font.size = Pt(30); tp.font.bold = True; tp.font.color.rgb = D
+            if kind == 'sources':
+                for i, item in enumerate(items[:4]):
+                    tb = slide.shapes.add_textbox(Inches(1.4), Inches(1.8 + i * 0.9), Inches(10.3), Inches(0.6))
+                    p = tb.text_frame.paragraphs[0]; p.text = '来源  ' + item; p.font.size = Pt(18); p.font.color.rgb = T
+            else:
+                mid = (len(items) + 1) // 2
+                for column, group in enumerate((items[:mid], items[mid:])):
+                    x = 0.8 + column * 6.0
+                    panel = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(1.55), Inches(5.6), Inches(4.4))
+                    panel.fill.solid(); panel.fill.fore_color.rgb = L; panel.line.fill.background()
+                    tf = panel.text_frame; tf.word_wrap = True
+                    for i, item in enumerate(group):
+                        p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+                        p.text = item; p.font.size = Pt(17); p.font.color.rgb = D; p.space_after = Pt(14)
+            continue
         lt = 1 if s.get('_image_path') else (idx - 1) % 3 + 1
         if lt == 0:
             slide.background.fill.solid(); slide.background.fill.fore_color.rgb = D
@@ -193,12 +262,14 @@ def gen(data):
             has_image = bool(s.get('_image_path'))
             text_width = Inches(6.4) if has_image else Inches(11)
             font_size = Pt(16 if len(items) >= 4 or any(len(str(x)) > 28 for x in items) else 18)
+            text_x = Inches(6.2) if has_image and idx % 2 == 0 else Inches(1.2)
             for i, item in enumerate(items):
-                tb2 = slide.shapes.add_textbox(Inches(1.2), Inches(1.9+i*1.05), text_width, Inches(0.9))
+                tb2 = slide.shapes.add_textbox(text_x, Inches(1.9+i*1.05), text_width, Inches(0.9))
                 tf2 = tb2.text_frame; tf2.word_wrap = True
                 p2 = tf2.paragraphs[0]; p2.text = '▪  ' + item; p2.font.size = font_size; p2.font.color.rgb = T
             if has_image:
-                slide.shapes.add_picture(s['_image_path'], Inches(8.2), Inches(2.0), Inches(4.1), Inches(4.1))
+                image_x = Inches(1.0) if idx % 2 == 0 else Inches(8.2)
+                slide.shapes.add_picture(s['_image_path'], image_x, Inches(2.0), Inches(4.1), Inches(4.1))
         elif lt == 2:
             items = s.get('content',[]); mid = (len(items)+1)//2
             tb2 = slide.shapes.add_textbox(Inches(0.8), Inches(0.4), Inches(11), Inches(0.9))
