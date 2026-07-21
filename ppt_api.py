@@ -32,7 +32,7 @@ def detect(t):
 
 def generate_image_url(prompt, api_key):
     """调用阿里 Z-Image 同步文生图接口，返回临时图片 URL。"""
-    image_prompt = '教育教学PPT插图，画面绝对不要任何文字、汉字、数字、字母、标志、海报或水印；构图简洁、主体清晰：' + prompt
+    image_prompt = '面向中国中小学课堂的教育教学PPT插图，人物和场景符合中国校园语境，不要正面对镜头摆拍；画面绝对不要任何文字、汉字、数字、字母、标志、海报或水印；构图简洁、主体清晰：' + prompt
     payload = json.dumps({
         'model': 'z-image-turbo',
         'input': {'messages': [{'role': 'user', 'content': [{'text': image_prompt}]}]}
@@ -76,28 +76,82 @@ def search_image_url(query, api_key):
             continue
     raise RuntimeError('联网搜图未返回可下载图片')
 
+def build_ppt_research(topic, api_key):
+    """阿里先完成事实检索、叙事建议和图片素材检索，供后续故事板使用。"""
+    import re
+    prompt = '''你是中国中小学教师的备课研究员。请联网研究主题：%s。
+只输出 JSON，不要 Markdown，格式必须为：
+{
+ "facts":["3-5条可核实的事实、案例或规范，每条含简短来源名"],
+ "sources":["2-4个来源名称或机构"],
+ "teaching_arc":["适合本主题的4-6步课堂叙事结构"],
+ "image_queries":[{"query":"一条具体且适合教学PPT的中文搜图关键词","caption":"这张图用于说明什么"}]
+}
+不得编造姓名、数字、事故或来源。image_queries 最多3条；只给确有必要的真实事件、物件、地点或现象，不要泛泛搜索人物摆拍、课堂合影、游泳池合影或新闻网页截图。''' % topic
+    payload = json.dumps({
+        'model': 'qwen-plus',
+        'messages': [{'role': 'user', 'content': prompt}],
+        'enable_search': True,
+        'search_options': {'forced_search': True},
+        'temperature': 0.2,
+    }).encode()
+    req = urllib.request.Request(
+        'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
+        data=payload,
+        headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
+    )
+    result = json.loads(urllib.request.urlopen(req, timeout=120).read().decode('utf-8'))
+    raw = result['choices'][0]['message']['content']
+    match = re.search(r'\{[\s\S]*\}', raw)
+    if not match:
+        raise RuntimeError('联网研究未返回结构化资料')
+    try:
+        pack = json.loads(match.group(0))
+    except ValueError as err:
+        raise RuntimeError('联网研究资料格式错误') from err
+    assets = []
+    for index, item in enumerate((pack.get('image_queries') or [])[:3]):
+        if not isinstance(item, dict) or not str(item.get('query', '')).strip():
+            continue
+        try:
+            assets.append({
+                'id': 'A' + str(len(assets) + 1),
+                'query': str(item['query']).strip(),
+                'caption': str(item.get('caption', item['query'])).strip(),
+                'url': search_image_url(str(item['query']).strip(), api_key),
+            })
+        except Exception as err:
+            print('[PPT API] research image unavailable:', str(err)[:120])
+    return {
+        'facts': (pack.get('facts') or [])[:5],
+        'sources': (pack.get('sources') or [])[:4],
+        'teaching_arc': (pack.get('teaching_arc') or [])[:6],
+        'assets': assets,
+    }
+
 def fit_slides(raw_slides):
     """把过长要点拆成续页，确保每页最多 4 条、每条最多约 42 个字符。"""
     if len(raw_slides) <= 2:
         return raw_slides
     fitted = [raw_slides[0]]
     for source in raw_slides[1:-1]:
+        kind = str(source.get('type', '')).lower()
         items = []
         for item in source.get('content', []):
             item = str(item).strip()
             if not item:
                 continue
-            while len(item) > 42:
+            # 案例页允许一段完整叙事，不把一个事件机械切成多条短句。
+            while kind != 'case' and len(item) > 42:
                 cut = max(item.rfind('，', 0, 42), item.rfind('。', 0, 42), item.rfind('；', 0, 42), item.rfind('、', 0, 42))
                 cut = cut + 1 if cut >= 18 else 42
                 items.append(item[:cut])
                 item = item[cut:].lstrip('，。；、 ')
             if item:
                 items.append(item)
-        kind = str(source.get('type', '')).lower()
         # 互动和步骤页需要留白；事实、案例、做法页可以承载更多信息。
         max_items = {
-            'scenario': 3, 'steps': 4, 'compare': 6,
+            'scenario': 3, 'steps': 6, 'compare': 6,
             'fact': 6, 'case': 6, 'action': 6, 'sources': 4,
         }.get(kind, 5)
         chunks = [items[i:i + max_items] for i in range(0, len(items), max_items)] or [[]]
@@ -116,6 +170,10 @@ def gen(data):
     W = RGBColor(0xFF,0xFF,0xFF); T = RGBColor(0x33,0x33,0x33)
     prs = Presentation(); prs.slide_width = Inches(13.333); prs.slide_height = Inches(7.5)
     slides = [dict(s, content=list(s.get('content', []))) for s in data.get('slides', [])]
+    asset_map = {
+        str(asset.get('id')): asset for asset in data.get('assets', [])
+        if isinstance(asset, dict) and asset.get('id') and asset.get('url')
+    }
     # 先移除插图标记，避免它作为文字渲染到 PPT 上。每份 PPT 最多生成两张图，
     # 控制等待时间和费用；提示词也会要求模型最多标记两页。
     import re
@@ -124,7 +182,13 @@ def gen(data):
         clean_content = []
         seen_items = set()
         visual = source.get('visual') if isinstance(source.get('visual'), dict) else {}
-        if visual.get('mode') in ('search', 'generate') and str(visual.get('prompt', '')).strip():
+        if visual.get('mode') == 'asset' and str(visual.get('asset_id', '')) in asset_map:
+            asset = asset_map[str(visual['asset_id'])]
+            source['_image_mode'] = '素材'
+            source['_image_url'] = asset['url']
+            source['_image_prompt'] = asset.get('caption', '')
+            image_requests.append(source)
+        elif visual.get('mode') in ('search', 'generate') and str(visual.get('prompt', '')).strip():
             source['_image_mode'] = '搜图' if visual['mode'] == 'search' else '生图'
             source['_image_prompt'] = str(visual['prompt']).strip()
             image_requests.append(source)
@@ -142,7 +206,8 @@ def gen(data):
                 clean_content.append(item)
                 seen_items.add(normalized)
         source['content'] = clean_content
-    # 模型偶尔会漏掉配图标记。默认补足三张真实搜索图，避免整份PPT都是AI插画。
+    # 模型偶尔会漏掉配图标记。默认使用与主题一致的无文字插画；
+    # 泛化搜图很容易得到不相关的摆拍或海外素材，真实事件才由故事板明确指定搜图。
     # 封面和结束页不放图，优先选择有正文要点的中间页。
     target_images = 3 if len(slides) >= 6 else 2
     if len(image_requests) < target_images:
@@ -151,7 +216,7 @@ def gen(data):
                 break
             if source.get('_image_prompt') or not source.get('content'):
                 continue
-            source['_image_mode'] = '搜图'
+            source['_image_mode'] = '生图'
             source['_image_prompt'] = str(source.get('title', '')) + '，' + '；'.join(str(x) for x in source['content'][:2])
             image_requests.append(source)
     if len(image_requests) > 3:
@@ -178,7 +243,9 @@ def gen(data):
             raise RuntimeError('PPT 需要插图，但 Railway 未配置 AI_API_KEY')
         image_path = os.path.join(tempfile.mkdtemp(prefix='ppt_img_'), 'image.png')
         try:
-            if source.get('_image_mode') == '搜图':
+            if source.get('_image_mode') == '素材':
+                image_url = source['_image_url']
+            elif source.get('_image_mode') == '搜图':
                 image_url = search_image_url(source['_image_prompt'], image_key)
             else:
                 image_url = generate_image_url(source['_image_prompt'], image_key)
@@ -189,7 +256,7 @@ def gen(data):
             source['_image_path'] = image_path
         except Exception as image_error:
             # 搜到的外站图片常有防盗链；改用无文字 AI 插图，不能因此丢掉整份课件。
-            if source.get('_image_mode') == '搜图':
+            if source.get('_image_mode') in ('搜图', '素材'):
                 try:
                     image_url = generate_image_url(source['_image_prompt'], image_key)
                     image_request = urllib.request.Request(image_url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -251,16 +318,34 @@ def gen(data):
                 p.text = item; p.font.size = Pt(21); p.font.color.rgb = T; p.alignment = PP_ALIGN.CENTER
                 p.space_after = Pt(12)
             continue
+        if kind == 'case':
+            title = slide.shapes.add_textbox(Inches(0.8), Inches(0.5), Inches(11.8), Inches(0.8))
+            tp = title.text_frame.paragraphs[0]; tp.text = s.get('title', ''); tp.font.size = Pt(30); tp.font.bold = True; tp.font.color.rgb = D
+            has_image = bool(s.get('_image_path'))
+            text_x = Inches(5.25) if has_image else Inches(1.1)
+            text_w = Inches(6.9) if has_image else Inches(11.1)
+            panel = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, text_x, Inches(1.55), text_w, Inches(4.5))
+            panel.fill.solid(); panel.fill.fore_color.rgb = L; panel.line.fill.background()
+            tf = panel.text_frame; tf.word_wrap = True
+            p = tf.paragraphs[0]; p.text = '\n'.join(items[:2]); p.font.size = Pt(18); p.font.color.rgb = T
+            if has_image:
+                slide.shapes.add_picture(s['_image_path'], Inches(0.85), Inches(1.7), Inches(3.85), Inches(3.85))
+            continue
         if kind == 'steps':
             title = slide.shapes.add_textbox(Inches(0.8), Inches(0.5), Inches(11.8), Inches(0.8))
             tp = title.text_frame.paragraphs[0]; tp.text = s.get('title', ''); tp.font.size = Pt(30); tp.font.bold = True; tp.font.color.rgb = D
-            count = min(max(len(items), 1), 4); width = 11.5 / count
-            for i, item in enumerate(items[:4]):
-                x = 0.9 + i * width
-                num = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(x + width / 2 - 0.28), Inches(1.55), Inches(0.56), Inches(0.56))
+            # 3×2 六宫格：例如“六不准”必须完整留在一页，而不是拆成续页。
+            count = min(max(len(items), 1), 6)
+            columns = 3 if count > 4 else count
+            card_w = 11.4 / columns
+            for i, item in enumerate(items[:6]):
+                col, row = i % columns, i // columns
+                x = 0.9 + col * card_w
+                y = 1.55 + row * 2.35
+                num = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(x + 0.22), Inches(y), Inches(0.56), Inches(0.56))
                 num.fill.solid(); num.fill.fore_color.rgb = A; num.line.fill.background()
                 np = num.text_frame.paragraphs[0]; np.text = str(i + 1); np.font.size = Pt(16); np.font.bold = True; np.font.color.rgb = W; np.alignment = PP_ALIGN.CENTER
-                card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(2.35), Inches(width - 0.28), Inches(2.15))
+                card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y + 0.72), Inches(card_w - 0.32), Inches(1.25))
                 card.fill.solid(); card.fill.fore_color.rgb = L; card.line.fill.background()
                 cp = card.text_frame.paragraphs[0]; cp.text = item; cp.font.size = Pt(16); cp.font.color.rgb = D; cp.font.bold = True; cp.alignment = PP_ALIGN.CENTER
             continue
@@ -693,18 +778,20 @@ def make_handler():
                         resp = json.dumps({'code': 0, 'data': b64_data, 'file': 'edited.xlsx'})
                 elif doc_type == 'chat':
                     import urllib.request, urllib.error
-                    # Use custom api_key from request if provided, otherwise env var
-                    api_key = body.get('api_key', '') or os.environ.get('DEEPSEEK_API_KEY', '').strip()
+                    # 统一使用阿里百炼：研究、故事板、文档文本与视觉能力都在同一工作空间内。
+                    api_key = os.environ.get('AI_API_KEY', '').strip()
                     if not api_key:
-                        resp = json.dumps({'code': -1, 'error': '服务器未配置DeepSeek API Key，请在Railway环境变量中设置 DEEPSEEK_API_KEY'})
+                        resp = json.dumps({'code': -1, 'error': '服务器未配置阿里 AI_API_KEY，请在Railway环境变量中设置 AI_API_KEY'})
                     else:
                         messages = body.get('messages', [])
-                        model = body.get('model', 'deepseek-chat')
+                        model = body.get('model', 'qwen-plus')
+                        if str(model).startswith('deepseek'):
+                            model = 'qwen-plus'
                         temp = body.get('temperature', 0.7)
                         max_tok = body.get('max_tokens', 4096)
                         post_data = json.dumps({'model': model, 'messages': messages, 'temperature': temp, 'max_tokens': max_tok, 'stream': False}).encode()
                         req = urllib.request.Request(
-                            'https://api.deepseek.com/v1/chat/completions',
+                            'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
                             data=post_data,
                             headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
                         )
@@ -743,6 +830,16 @@ def make_handler():
                             resp = json.dumps({'code': 0, 'data': reply})
                         except Exception as e:
                             resp = json.dumps({'code': -1, 'error': '搜索失败: ' + str(e)[:200]})
+                elif doc_type == 'ppt-research':
+                    api_key = os.environ.get('AI_API_KEY', '').strip()
+                    if not api_key:
+                        resp = json.dumps({'code': -1, 'error': 'PPT联网研究未配置（需在Railway设置 AI_API_KEY）'})
+                    else:
+                        try:
+                            pack = build_ppt_research(body.get('topic', ''), api_key)
+                            resp = json.dumps({'code': 0, 'data': pack}, ensure_ascii=False)
+                        except Exception as e:
+                            resp = json.dumps({'code': -1, 'error': 'PPT联网研究失败: ' + str(e)[:200]})
                 elif doc_type == 'vision':
                     api_key = os.environ.get('AI_API_KEY', '').strip()
                     if not api_key:
