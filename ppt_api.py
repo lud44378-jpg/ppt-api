@@ -30,12 +30,130 @@ def detect(t):
     if '总结' in s or '计划' in s or '规划' in s: return 'plan'
     return 'default'
 
+def generate_image_url(prompt, api_key):
+    """调用阿里文生图并等待图片 URL。失败必须抛出异常，不能伪造占位图。"""
+    import time
+    image_prompt = '教育教学PPT插图，无文字、无水印、构图简洁，适合放在16:9演示文稿右侧：' + prompt
+    payload = json.dumps({
+        'model': 'z-image-turbo',
+        'input': {'prompt': image_prompt},
+        'parameters': {'size': '1024*1024', 'n': 1}
+    }).encode()
+    req = urllib.request.Request(
+        'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis',
+        data=payload,
+        headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
+    )
+    result = json.loads(urllib.request.urlopen(req, timeout=120).read().decode('utf-8'))
+    task_id = result.get('output', {}).get('task_id', '')
+    if not task_id:
+        raise RuntimeError('阿里生图任务创建失败')
+    for _ in range(30):
+        time.sleep(2)
+        poll_req = urllib.request.Request(
+            'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/tasks/' + task_id,
+            headers={'Authorization': 'Bearer ' + api_key}
+        )
+        poll = json.loads(urllib.request.urlopen(poll_req, timeout=30).read().decode('utf-8'))
+        status = poll.get('output', {}).get('task_status', '')
+        if status == 'SUCCEEDED':
+            image_url = poll.get('output', {}).get('results', [{}])[0].get('url', '')
+            if image_url:
+                return image_url
+            raise RuntimeError('阿里生图未返回图片地址')
+        if status in ('FAILED', 'CANCELED'):
+            raise RuntimeError('阿里生图失败')
+    raise RuntimeError('阿里生图超时')
+
+def search_image_url(query, api_key):
+    """使用阿里文搜图获取真实图片地址，适用于人物、事件、器材等事实性页面。"""
+    payload = json.dumps({
+        'model': 'qwen3.6-flash',
+        'input': '请搜索一张可用于教学PPT的真实图片：' + query,
+        'tools': [{'type': 'web_search_image'}],
+        'store': False
+    }).encode()
+    req = urllib.request.Request(
+        'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/responses',
+        data=payload,
+        headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
+    )
+    response = json.loads(urllib.request.urlopen(req, timeout=120).read().decode('utf-8'))
+    for item in response.get('output', []):
+        if item.get('type') != 'web_search_image_call':
+            continue
+        try:
+            images = json.loads(item.get('output', '[]'))
+            if images and images[0].get('url'):
+                return images[0]['url']
+        except (TypeError, ValueError):
+            continue
+    raise RuntimeError('联网搜图未返回可下载图片')
+
+def fit_slides(raw_slides):
+    """把过长要点拆成续页，确保每页最多 4 条、每条最多约 42 个字符。"""
+    if len(raw_slides) <= 2:
+        return raw_slides
+    fitted = [raw_slides[0]]
+    for source in raw_slides[1:-1]:
+        items = []
+        for item in source.get('content', []):
+            item = str(item).strip()
+            if not item:
+                continue
+            while len(item) > 42:
+                cut = max(item.rfind('，', 0, 42), item.rfind('。', 0, 42), item.rfind('；', 0, 42), item.rfind('、', 0, 42))
+                cut = cut + 1 if cut >= 18 else 42
+                items.append(item[:cut])
+                item = item[cut:].lstrip('，。；、 ')
+            if item:
+                items.append(item)
+        chunks = [items[i:i + 4] for i in range(0, len(items), 4)] or [[]]
+        for chunk_index, chunk in enumerate(chunks):
+            slide = dict(source)
+            slide['content'] = chunk
+            if chunk_index:
+                slide['title'] = str(source.get('title', '')) + '（续）'
+            fitted.append(slide)
+    fitted.append(raw_slides[-1])
+    return fitted
+
 def gen(data):
     th = THEME.get(detect(data.get('title','')), THEME['default'])
     D = rgb(th[0]); P = rgb(th[1]); A = rgb(th[2]); L = rgb(th[3])
     W = RGBColor(0xFF,0xFF,0xFF); T = RGBColor(0x33,0x33,0x33)
     prs = Presentation(); prs.slide_width = Inches(13.333); prs.slide_height = Inches(7.5)
-    slides = data.get('slides',[]); n = len(slides)
+    slides = [dict(s, content=list(s.get('content', []))) for s in data.get('slides', [])]
+    # 先移除插图标记，避免它作为文字渲染到 PPT 上。每份 PPT 最多生成两张图，
+    # 控制等待时间和费用；提示词也会要求模型最多标记两页。
+    import re
+    image_requests = []
+    for source in slides:
+        clean_content = []
+        for item in source.get('content', []):
+            match = re.search(r'\[(\u641c\u56fe|\u751f\u56fe|\u63d2\u56fe)\uff1a(.+?)\]', str(item))
+            if match:
+                source['_image_mode'] = match.group(1)
+                source['_image_prompt'] = match.group(2).strip()
+                item = str(item).replace(match.group(0), '').strip()
+                image_requests.append(source)
+            if item:
+                clean_content.append(item)
+        source['content'] = clean_content
+    if len(image_requests) > 2:
+        raise RuntimeError('PPT 插图数量超过 2 张，请减少插图标记后重试')
+    image_key = os.environ.get('AI_API_KEY', '').strip()
+    for source in image_requests:
+        if not image_key:
+            raise RuntimeError('PPT 需要插图，但 Railway 未配置 AI_API_KEY')
+        if source.get('_image_mode') == '搜图':
+            image_url = search_image_url(source['_image_prompt'], image_key)
+        else:
+            image_url = generate_image_url(source['_image_prompt'], image_key)
+        image_path = os.path.join(tempfile.mkdtemp(prefix='ppt_img_'), 'image.png')
+        urllib.request.urlretrieve(image_url, image_path)
+        source['_image_path'] = image_path
+    slides = fit_slides(slides); n = len(slides)
 
     for idx, s in enumerate(slides):
         slide = prs.slides.add_slide(prs.slide_layouts[6])
@@ -61,7 +179,7 @@ def gen(data):
                 p2 = tf.add_paragraph(); p2.text = s['content'][0]; p2.font.size = Pt(22)
                 p2.font.color.rgb = A; p2.alignment = PP_ALIGN.CENTER; p2.space_before = Pt(16)
             continue
-        lt = (idx - 1) % 3 + 1  # 0=封面已用, 1~3=内容布局(跳过深色章节)
+        lt = 1 if s.get('_image_path') else (idx - 1) % 3 + 1
         if lt == 0:
             slide.background.fill.solid(); slide.background.fill.fore_color.rgb = D
             tb = slide.shapes.add_textbox(Inches(1), Inches(2.5), Inches(11), Inches(1.5))
@@ -73,9 +191,16 @@ def gen(data):
             bar.fill.solid(); bar.fill.fore_color.rgb = D; bar.line.fill.background()
             tf = bar.text_frame; tf.word_wrap = True
             p = tf.paragraphs[0]; p.text = '  ' + s.get('title',''); p.font.size = Pt(32); p.font.bold = True; p.font.color.rgb = W
-            for i, item in enumerate(s.get('content',[])[:6]):
-                tb2 = slide.shapes.add_textbox(Inches(1.2), Inches(2.0+i*0.6), Inches(11), Inches(0.55))
-                p2 = tb2.text_frame.paragraphs[0]; p2.text = '▪  ' + item; p2.font.size = Pt(18); p2.font.color.rgb = T
+            items = s.get('content', [])
+            has_image = bool(s.get('_image_path'))
+            text_width = Inches(6.4) if has_image else Inches(11)
+            font_size = Pt(16 if len(items) >= 4 or any(len(str(x)) > 28 for x in items) else 18)
+            for i, item in enumerate(items):
+                tb2 = slide.shapes.add_textbox(Inches(1.2), Inches(1.9+i*1.05), text_width, Inches(0.9))
+                tf2 = tb2.text_frame; tf2.word_wrap = True
+                p2 = tf2.paragraphs[0]; p2.text = '▪  ' + item; p2.font.size = font_size; p2.font.color.rgb = T
+            if has_image:
+                slide.shapes.add_picture(s['_image_path'], Inches(8.2), Inches(2.0), Inches(4.1), Inches(4.1))
         elif lt == 2:
             items = s.get('content',[]); mid = (len(items)+1)//2
             tb2 = slide.shapes.add_textbox(Inches(0.8), Inches(0.4), Inches(11), Inches(0.9))
@@ -84,72 +209,28 @@ def gen(data):
                 card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(0.5), Inches(1.6+i*1.0), Inches(6), Inches(0.8))
                 card.fill.solid(); card.fill.fore_color.rgb = L; card.line.fill.background()
                 tf2 = card.text_frame; tf2.word_wrap = True; p3 = tf2.paragraphs[0]; p3.text = item
-                p3.font.size = Pt(16); p3.font.color.rgb = D; p3.font.bold = True; p3.alignment = PP_ALIGN.CENTER
+                p3.font.size = Pt(14); p3.font.color.rgb = D; p3.font.bold = True; p3.alignment = PP_ALIGN.CENTER
             for i, item in enumerate(items[mid:]):
                 card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(6.8), Inches(1.6+i*1.0), Inches(6), Inches(0.8))
                 card.fill.solid(); card.fill.fore_color.rgb = L; card.line.fill.background()
                 tf2 = card.text_frame; tf2.word_wrap = True; p3 = tf2.paragraphs[0]; p3.text = item
-                p3.font.size = Pt(16); p3.font.color.rgb = D; p3.font.bold = True; p3.alignment = PP_ALIGN.CENTER
+                p3.font.size = Pt(14); p3.font.color.rgb = D; p3.font.bold = True; p3.alignment = PP_ALIGN.CENTER
         else:
             tb2 = slide.shapes.add_textbox(Inches(0.8), Inches(0.3), Inches(11), Inches(0.9))
             p2 = tb2.text_frame.paragraphs[0]; p2.text = s.get('title',''); p2.font.size = Pt(30); p2.font.bold = True; p2.font.color.rgb = P
             line = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.8), Inches(1.2), Inches(11.5), Pt(4))
             line.fill.solid(); line.fill.fore_color.rgb = A; line.line.fill.background()
-            for i, item in enumerate(s.get('content',[])[:6]):
-                y = 1.8 + i * 1.4
+            items = s.get('content', [])
+            item_step = 1.15 if len(items) >= 4 else 1.4
+            item_font = Pt(16 if len(items) >= 4 else 18)
+            for i, item in enumerate(items):
+                y = 1.8 + i * item_step
                 circle = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(0.8), Inches(y), Inches(0.7), Inches(0.7))
                 circle.fill.solid(); circle.fill.fore_color.rgb = P; circle.line.fill.background()
                 tf2 = circle.text_frame; tf2.word_wrap = False; p3 = tf2.paragraphs[0]; p3.text = str(i+1)
                 p3.font.size = Pt(20); p3.font.bold = True; p3.font.color.rgb = W; p3.alignment = PP_ALIGN.CENTER
                 tb3 = slide.shapes.add_textbox(Inches(2.0), Inches(y+0.05), Inches(10), Inches(0.6))
-                p4 = tb3.text_frame.paragraphs[0]; p4.text = item; p4.font.size = Pt(18); p4.font.color.rgb = T
-
-    # Process [插图：xxx] markers - replace with image placeholders
-    img_key = os.environ.get('AI_API_KEY', '').strip()
-    if slides and img_key:
-        for idx, s in enumerate(slides):
-            for ci, item in enumerate(s.get('content', [])):
-                import re
-                m = re.search(r'\[\u63d2\u56fe\uff1a(.+?)\]', str(item))
-                if m:
-                    query = m.group(1).strip()
-                    s['content'][ci] = item.replace(m.group(0), '').strip()
-                    try:
-                        # Search for image using 通义千问
-                        import urllib.request, urllib.error
-                        search_q = f'搜索一张关于{query}的图片，返回一个可以直接访问的图片URL'
-                        sd = json.dumps({
-                            'model': 'qwen-turbo',
-                            'messages': [{'role': 'user', 'content': search_q}],
-                            'enable_search': True
-                        }).encode()
-                        sq = urllib.request.Request(
-                            'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
-                            data=sd,
-                            headers={'Authorization': 'Bearer ' + img_key, 'Content-Type': 'application/json'}
-                        )
-                        sr = urllib.request.urlopen(sq, timeout=30)
-                        sr_result = json.loads(sr.read().decode())
-                        img_url = ''
-                        for word in sr_result['choices'][0]['message']['content'].split():
-                            w = word.strip('.,;:!?"\'()[]<>')
-                            if w.startswith('http') and any(w.endswith(e) for e in ['.jpg','.jpeg','.png','.gif']):
-                                img_url = w
-                                break
-                        if img_url:
-                            urllib.request.urlretrieve(img_url, '/tmp/ppt_img_' + str(idx) + '.jpg')
-                            slide = prs.slides[idx]
-                            slide.shapes.add_picture('/tmp/ppt_img_' + str(idx) + '.jpg', Inches(8.5), Inches(1.5), Inches(4), Inches(3))
-                    except:
-                        # Placeholder if image search fails
-                        try:
-                            slide = prs.slides[idx]
-                            shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(8.5), Inches(1.5), Inches(4), Inches(3))
-                            shape.fill.solid(); shape.fill.fore_color.rgb = L; shape.line.fill.background()
-                            tf = shape.text_frame; tf.word_wrap = True
-                            p = tf.paragraphs[0]; p.text = query; p.font.size = Pt(14)
-                            p.font.color.rgb = D; p.alignment = PP_ALIGN.CENTER
-                        except: pass
+                p4 = tb3.text_frame.paragraphs[0]; p4.text = item; p4.font.size = item_font; p4.font.color.rgb = T
     buf = io.BytesIO()
     prs.save(buf)
     return buf.getvalue()
@@ -554,9 +635,10 @@ def make_handler():
                         import urllib.request, urllib.error
                         query = body.get('query', '')
                         search_data = json.dumps({
-                            'model': 'qwen-turbo',
+                            'model': 'qwen-plus',
                             'messages': [{'role': 'user', 'content': query}],
-                            'enable_search': True
+                            'enable_search': True,
+                            'search_options': {'forced_search': True}
                         }).encode()
                         req = urllib.request.Request(
                             'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
