@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """师助AI - PPT生成 API (部署到 Railway / Render)"""
-import os, json, io, base64, http.server, uuid, tempfile, urllib.request, urllib.error, traceback
+import os, json, io, base64, http.server, uuid, tempfile, urllib.request, urllib.error
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
@@ -31,39 +31,25 @@ def detect(t):
     return 'default'
 
 def generate_image_url(prompt, api_key):
-    """调用阿里文生图并等待图片 URL。失败必须抛出异常，不能伪造占位图。"""
-    import time
+    """调用阿里 Z-Image 同步文生图接口，返回临时图片 URL。"""
     image_prompt = '教育教学PPT插图，无文字、无水印、构图简洁，适合放在16:9演示文稿右侧：' + prompt
     payload = json.dumps({
         'model': 'z-image-turbo',
-        'input': {'prompt': image_prompt},
-        'parameters': {'size': '1024*1024', 'n': 1}
+        'input': {'messages': [{'role': 'user', 'content': [{'text': image_prompt}]}]}
     }).encode()
     req = urllib.request.Request(
-        'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis',
+        'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
         data=payload,
         headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
     )
     result = json.loads(urllib.request.urlopen(req, timeout=120).read().decode('utf-8'))
-    task_id = result.get('output', {}).get('task_id', '')
-    if not task_id:
-        raise RuntimeError('阿里生图任务创建失败')
-    for _ in range(30):
-        time.sleep(2)
-        poll_req = urllib.request.Request(
-            'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/tasks/' + task_id,
-            headers={'Authorization': 'Bearer ' + api_key}
-        )
-        poll = json.loads(urllib.request.urlopen(poll_req, timeout=30).read().decode('utf-8'))
-        status = poll.get('output', {}).get('task_status', '')
-        if status == 'SUCCEEDED':
-            image_url = poll.get('output', {}).get('results', [{}])[0].get('url', '')
-            if image_url:
-                return image_url
-            raise RuntimeError('阿里生图未返回图片地址')
-        if status in ('FAILED', 'CANCELED'):
-            raise RuntimeError('阿里生图失败')
-    raise RuntimeError('阿里生图超时')
+    if result.get('code'):
+        raise RuntimeError('阿里生图失败：' + result.get('message', result['code']))
+    content = result.get('output', {}).get('choices', [{}])[0].get('message', {}).get('content', [])
+    for item in content:
+        if isinstance(item, dict) and item.get('image'):
+            return item['image']
+    raise RuntimeError('阿里生图未返回图片地址')
 
 def search_image_url(query, api_key):
     """使用阿里文搜图获取真实图片地址，适用于人物、事件、器材等事实性页面。"""
@@ -389,22 +375,7 @@ def parse_file(data):
                 mime_type = 'bmp'
             else:
                 mime_type = 'jpeg'
-            # 两个阿里接口使用相同的多模态请求体。不要吞掉首个异常，
-            # 否则下游会把异常文字当成“文件内容”交给 AI 总结。
-            # 百炼现行推荐的是业务空间专属的 OpenAI 兼容接口；它比旧的
-            # multimodal-generation 路径在 Railway 出网环境更稳定。
-            compat_ocr_data = json.dumps({
-                'model': 'qwen3-vl-flash',
-                'messages': [{'role': 'user', 'content': [
-                    {'type': 'text', 'text': '请提取这张图片中的所有文字内容，直接输出文字，不要额外说明'},
-                    {'type': 'image_url', 'image_url': {
-                        'url': 'data:image/' + mime_type + ';base64,' + img_b64
-                    }}
-                ]}],
-                'temperature': 0.1,
-                'max_tokens': 4096,
-            }).encode()
-            legacy_ocr_data = json.dumps({
+            ocr_data = json.dumps({
                 'model': 'qwen3-vl-flash',
                 'input': {
                     'messages': [{'role': 'user', 'content': [
@@ -413,43 +384,20 @@ def parse_file(data):
                     ]}]
                 }
             }).encode()
-            endpoints = [
-                ('https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions', compat_ocr_data, True),
-                ('https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation', legacy_ocr_data, False),
-                ('https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation', legacy_ocr_data, False),
-            ]
-            errors = []
-            for endpoint, request_data, is_compatible in endpoints:
-                req = urllib.request.Request(
-                    endpoint,
-                    data=request_data,
-                    headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
+            req = urllib.request.Request(
+                'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+                data=ocr_data,
+                headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
+            )
+            response = urllib.request.urlopen(req, timeout=120)
+            result = json.loads(response.read().decode('utf-8'))
+            text = result['output']['choices'][0]['message']['content']
+            if isinstance(text, list):
+                text = ''.join(
+                    part.get('text', '') if isinstance(part, dict) else str(part)
+                    for part in text
                 )
-                try:
-                    response = urllib.request.urlopen(req, timeout=120)
-                    result = json.loads(response.read().decode('utf-8'))
-                    if is_compatible:
-                        text = result['choices'][0]['message']['content']
-                    else:
-                        text = result['output']['choices'][0]['message']['content']
-                    # 部分多模态模型会把内容返回为片段数组。
-                    if isinstance(text, list):
-                        text = ''.join(
-                            part.get('text', '') if isinstance(part, dict) else str(part)
-                            for part in text
-                        )
-                    text = str(text).strip()
-                    if not text:
-                        raise ValueError('识别接口未返回文字内容')
-                    return '【图片：' + filename + '】\n' + text
-                except urllib.error.HTTPError as err:
-                    detail = err.read()[:500].decode('utf-8', errors='replace')
-                    errors.append('HTTP ' + str(err.code) + ': ' + detail)
-                except Exception as err:
-                    errors.append(str(err)[:500])
-
-            detail = '；'.join(errors) or '未知错误'
-            raise RuntimeError('图片文字识别失败：' + detail)
+            return '【图片：' + filename + '】\n' + str(text).strip()
         elif ext == 'pdf':
             import pdfplumber
             import io
@@ -850,10 +798,6 @@ def make_handler():
                 self.end_headers()
                 self.wfile.write(resp.encode())
             except Exception as e:
-                # Railway 的请求概览只会显示 500；完整堆栈必须写入标准输出，
-                # 否则无法区分 API Key、模型权限、接口返回或文件内容错误。
-                print('[PPT API] request failed:', repr(e), flush=True)
-                traceback.print_exc()
                 self.send_response(500)
                 self.send_header('Content-Type', 'application/json')
                 self._set_cors()
