@@ -391,7 +391,20 @@ def parse_file(data):
                 mime_type = 'jpeg'
             # 两个阿里接口使用相同的多模态请求体。不要吞掉首个异常，
             # 否则下游会把异常文字当成“文件内容”交给 AI 总结。
-            ocr_data = json.dumps({
+            # 百炼现行推荐的是业务空间专属的 OpenAI 兼容接口；它比旧的
+            # multimodal-generation 路径在 Railway 出网环境更稳定。
+            compat_ocr_data = json.dumps({
+                'model': 'qwen3-vl-flash',
+                'messages': [{'role': 'user', 'content': [
+                    {'type': 'text', 'text': '请提取这张图片中的所有文字内容，直接输出文字，不要额外说明'},
+                    {'type': 'image_url', 'image_url': {
+                        'url': 'data:image/' + mime_type + ';base64,' + img_b64
+                    }}
+                ]}],
+                'temperature': 0.1,
+                'max_tokens': 4096,
+            }).encode()
+            legacy_ocr_data = json.dumps({
                 'model': 'qwen3-vl-flash',
                 'input': {
                     'messages': [{'role': 'user', 'content': [
@@ -401,20 +414,24 @@ def parse_file(data):
                 }
             }).encode()
             endpoints = [
-                'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
-                'https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+                ('https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions', compat_ocr_data, True),
+                ('https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation', legacy_ocr_data, False),
+                ('https://ws-5ol6m5p8f4hikz1a.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation', legacy_ocr_data, False),
             ]
             errors = []
-            for endpoint in endpoints:
+            for endpoint, request_data, is_compatible in endpoints:
                 req = urllib.request.Request(
                     endpoint,
-                    data=ocr_data,
+                    data=request_data,
                     headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
                 )
                 try:
                     response = urllib.request.urlopen(req, timeout=120)
                     result = json.loads(response.read().decode('utf-8'))
-                    text = result['output']['choices'][0]['message']['content']
+                    if is_compatible:
+                        text = result['choices'][0]['message']['content']
+                    else:
+                        text = result['output']['choices'][0]['message']['content']
                     # 部分多模态模型会把内容返回为片段数组。
                     if isinstance(text, list):
                         text = ''.join(
