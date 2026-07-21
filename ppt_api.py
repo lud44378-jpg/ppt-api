@@ -51,7 +51,7 @@ def generate_image_url(prompt, api_key):
             return item['image']
     raise RuntimeError('阿里生图未返回图片地址')
 
-def search_image_url(query, api_key):
+def search_image_url(query, api_key, timeout=120):
     """使用阿里文搜图获取真实图片地址，适用于人物、事件、器材等事实性页面。"""
     payload = json.dumps({
         'model': 'qwen3.6-flash',
@@ -64,7 +64,7 @@ def search_image_url(query, api_key):
         data=payload,
         headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'}
     )
-    response = json.loads(urllib.request.urlopen(req, timeout=120).read().decode('utf-8'))
+    response = json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode('utf-8'))
     for item in response.get('output', []):
         if item.get('type') != 'web_search_image_call':
             continue
@@ -109,19 +109,29 @@ def build_ppt_research(topic, api_key):
         pack = json.loads(match.group(0))
     except ValueError as err:
         raise RuntimeError('联网研究资料格式错误') from err
+    candidates = [
+        item for item in (pack.get('image_queries') or [])[:3]
+        if isinstance(item, dict) and str(item.get('query', '')).strip()
+    ]
+    # 三张图片并行检索，不能让素材预取的耗时累加到数分钟。
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     assets = []
-    for index, item in enumerate((pack.get('image_queries') or [])[:3]):
-        if not isinstance(item, dict) or not str(item.get('query', '')).strip():
-            continue
-        try:
-            assets.append({
-                'id': 'A' + str(len(assets) + 1),
-                'query': str(item['query']).strip(),
-                'caption': str(item.get('caption', item['query'])).strip(),
-                'url': search_image_url(str(item['query']).strip(), api_key),
-            })
-        except Exception as err:
-            print('[PPT API] research image unavailable:', str(err)[:120])
+    def fetch_asset(item):
+        query = str(item['query']).strip()
+        return {
+            'query': query,
+            'caption': str(item.get('caption', query)).strip(),
+            'url': search_image_url(query, api_key, timeout=45),
+        }
+    with ThreadPoolExecutor(max_workers=min(3, len(candidates) or 1)) as pool:
+        futures = [pool.submit(fetch_asset, item) for item in candidates]
+        for future in as_completed(futures):
+            try:
+                asset = future.result()
+                asset['id'] = 'A' + str(len(assets) + 1)
+                assets.append(asset)
+            except Exception as err:
+                print('[PPT API] research image unavailable:', str(err)[:120])
     return {
         'facts': (pack.get('facts') or [])[:5],
         'sources': (pack.get('sources') or [])[:4],
