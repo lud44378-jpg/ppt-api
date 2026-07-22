@@ -1341,7 +1341,7 @@ def _normalise_native_deck(plan, topic, detail):
 
 
 def build_native_deck(body):
-    """Research and write a bounded teaching storyboard for the native renderer."""
+    """Use the existing Alibaba Qwen key to research and write the native storyboard."""
     topic = str(body.get('topic') or body.get('title') or '').strip()
     if not topic:
         raise RuntimeError('PPT主题不能为空')
@@ -1349,11 +1349,18 @@ def build_native_deck(body):
     grade = str(body.get('grade') or '').strip()
     subject = str(body.get('subject') or '').strip()
     extra = str(body.get('userDetail') or body.get('harvest') or '').strip()[:1600]
-    print('[PPT NATIVE] 01 research-and-storyboard topic=%s detail=%s' % (topic, detail))
-    raw, sources = _mimo_chat([
-        {'role': 'system', 'content': '你是严谨的中国教育工作者。只输出用户请求的 JSON。'},
-        {'role': 'user', 'content': _native_ppt_prompt(topic, grade, subject, extra, detail)},
-    ], web=True, temperature=0.48, timeout=135)
+    api_key = os.environ.get('AI_API_KEY', '').strip()
+    if not api_key:
+        raise RuntimeError('原生PPT服务未配置 AI_API_KEY，请在 Railway 设置阿里百炼 API Key')
+    print('[PPT NATIVE] 01 qwen-research-and-storyboard topic=%s detail=%s' % (topic, detail))
+    # _qwen_search_storyboard uses Alibaba Qwen Plus with forced web search and
+    # returns only citations supplied by the actual search response. No MiMo key
+    # or Alibaba official-PPT mixed-billing service is involved.
+    raw, sources = _qwen_search_storyboard(
+        api_key,
+        _native_ppt_prompt(topic, grade, subject, extra, detail),
+        timeout=135,
+    )
     deck = _normalise_native_deck(_extract_json_object(raw, 'MiMo'), topic, detail)
     deck['theme'] = str(body.get('theme') or detect(topic))
     deck['sources'] = sources[:6]
