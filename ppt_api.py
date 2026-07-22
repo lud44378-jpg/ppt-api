@@ -8,7 +8,7 @@ from pptx.enum.text import PP_ALIGN
 from pptx.enum.shapes import MSO_SHAPE
 
 DL_DIR = tempfile.mkdtemp(prefix="seat_dl_")
-PPT_PIPELINE_VERSION = 'research-v10-source-images'
+PPT_PIPELINE_VERSION = 'official-ppt-v1'
 
 THEME = {
     'exam':    ('#1A237E', '#2B579A', '#E53935', '#E8EAF6'),
@@ -331,7 +331,7 @@ def build_ppt_deck(body, api_key):
     visual_candidates = [
         (index, slide) for index, slide in enumerate(slides)
         if slide.get('type') in ('narrative', 'explain', 'case') and (slide.get('image_query') or slide.get('source_urls'))
-    ][:image_limit]
+    ][:image_limit] if not body.get('_skip_assets') else []
     if visual_candidates:
         # 先取资料原网页公开配图；没有时才搜图。依次请求避免阿里搜图并发时一起超时。
         for index, slide in visual_candidates:
@@ -366,6 +366,110 @@ def build_ppt_deck(body, api_key):
         'debug': debug,
     }
     return deck
+
+def _official_ppt_config():
+    """阿里官方 PPT 服务使用云账号 AK，不与百炼模型 API Key 混用。"""
+    access_key_id = (os.environ.get('ALIYUN_ACCESS_KEY_ID') or os.environ.get('ALIBABA_CLOUD_ACCESS_KEY_ID') or '').strip()
+    access_key_secret = (os.environ.get('ALIYUN_ACCESS_KEY_SECRET') or os.environ.get('ALIBABA_CLOUD_ACCESS_KEY_SECRET') or '').strip()
+    workspace_id = (os.environ.get('BAILIAN_WORKSPACE_ID') or '').strip()
+    missing = []
+    if not access_key_id: missing.append('ALIYUN_ACCESS_KEY_ID')
+    if not access_key_secret: missing.append('ALIYUN_ACCESS_KEY_SECRET')
+    if not workspace_id: missing.append('BAILIAN_WORKSPACE_ID')
+    if missing:
+        raise RuntimeError('官方PPT服务尚未配置：请在 Railway 添加 ' + '、'.join(missing))
+    return access_key_id, access_key_secret, workspace_id
+
+def _deck_to_official_outline(deck):
+    """把已审过的课堂故事板转成官方 PPT 服务要求的 Markdown 大纲。"""
+    lines = ['# ' + str(deck.get('title') or '教学课件')]
+    for slide in deck.get('slides', []):
+        kind = str(slide.get('type') or '')
+        if kind in ('cover', 'sources', 'closing'):
+            continue
+        title = str(slide.get('title') or '').strip()
+        content = [str(x).strip() for x in slide.get('content', []) if str(x).strip()]
+        if not title or not content:
+            continue
+        lines.append('## ' + title)
+        for item in content:
+            lines.append('- ' + item)
+    if len(lines) < 3:
+        raise RuntimeError('PPT大纲内容不足，未提交官方生成服务')
+    return '\n'.join(lines)
+
+def _official_get_ppt_info(client, workspace_id, task_id):
+    """官方 Demo 中的 GetPptInfo 轮询接口。"""
+    from alibabacloud_aimiaobi20230801 import models as aimiaobi_models
+    from darabonba.runtime import RuntimeOptions
+    request = aimiaobi_models.GetPptInfoRequest(workspace_id=workspace_id, task_id=task_id)
+    response = client.get_ppt_info_with_options(
+        request, RuntimeOptions(read_timeout=30000, connect_timeout=10000)
+    )
+    return getattr(getattr(response, 'body', None), 'data', None)
+
+def build_official_ppt(body, api_key):
+    """内容大纲由模型产生，版式、素材和 PPTX 由阿里官方 PPT 服务生成。"""
+    access_key_id, access_key_secret, workspace_id = _official_ppt_config()
+    try:
+        from alibabacloud_tea_openapi import models as open_api_models
+        from alibabacloud_aimiaobi20230801.client import Client as AimiaobiClient
+        from alibabacloud_aimiaobi20230801 import models as aimiaobi_models
+        from darabonba.runtime import RuntimeOptions
+    except ImportError as err:
+        raise RuntimeError('官方PPT依赖未安装，请确认 Railway 已按最新 requirements.txt 重新部署') from err
+
+    outline_body = dict(body)
+    outline_body['_skip_assets'] = True
+    deck = build_ppt_deck(outline_body, api_key)
+    outline = _deck_to_official_outline(deck)
+    if body.get('debug'):
+        print('[PPT TRACE] 07_official_outline: ' + outline[:12000])
+
+    config = open_api_models.Config(
+        access_key_id=access_key_id,
+        access_key_secret=access_key_secret,
+        region_id='cn-beijing',
+        endpoint='aimiaobi.cn-beijing.aliyuncs.com',
+    )
+    client = AimiaobiClient(config)
+    task_id = str(uuid.uuid4())
+    request = aimiaobi_models.InitiatePptCreationV2Request(
+        workspace_id=workspace_id,
+        task_id=task_id,
+        outline=outline,
+        process_type=4,
+    )
+    response = client.initiate_ppt_creation_v2with_options(
+        request, RuntimeOptions(read_timeout=30000, connect_timeout=10000)
+    )
+    data = getattr(getattr(response, 'body', None), 'data', None)
+    if not data:
+        raise RuntimeError('官方PPT服务未返回创建任务')
+    if body.get('debug'):
+        print('[PPT TRACE] 08_official_task: ' + json.dumps({
+            'task_id': task_id,
+            'export_task_id': getattr(data, 'export_task_id', None),
+        }, ensure_ascii=False))
+
+    # 官方场景五会在任务信息中返回最终链接；最长约两分钟，避免小程序无限等待。
+    import time
+    for attempt in range(40):
+        info = _official_get_ppt_info(client, workspace_id, task_id)
+        links = getattr(info, 'export_file_link', None) or []
+        if isinstance(links, str):
+            links = [links]
+        if links:
+            download_url = str(links[0])
+            image_request = urllib.request.Request(download_url, headers={'User-Agent': 'Mozilla/5.0'})
+            pptx_bytes = urllib.request.urlopen(image_request, timeout=45).read()
+            if len(pptx_bytes) < 5000:
+                raise RuntimeError('官方PPT导出文件异常')
+            if body.get('debug'):
+                print('[PPT TRACE] 09_official_export: ' + json.dumps({'attempt': attempt + 1, 'bytes': len(pptx_bytes)}, ensure_ascii=False))
+            return pptx_bytes, deck
+        time.sleep(3)
+    raise RuntimeError('官方PPT仍在生成，请稍后重试')
 
 def fit_slides(raw_slides):
     """把过长要点拆成续页，确保每页最多 4 条、每条最多约 42 个字符。"""
@@ -1095,16 +1199,15 @@ def make_handler():
                     if not api_key:
                         resp = json.dumps({'code': -1, 'error': 'PPT生成未配置 AI_API_KEY'})
                     else:
-                        deck = build_ppt_deck(body, api_key)
-                        pptx_bytes = gen(deck)
+                        # PPT 主链路改用阿里官方全云端服务；本服务只生成教学大纲并转发导出文件。
+                        pptx_bytes, deck = build_official_ppt(body, api_key)
                         fid = str(uuid.uuid4())
                         fpath = os.path.join(DL_DIR, fid + '.pptx')
                         with open(fpath, 'wb') as fh:
                             fh.write(pptx_bytes)
                         if body.get('debug'):
-                            print('[PPT TRACE] 07_render_result: ' + json.dumps({
+                            print('[PPT TRACE] 10_official_result: ' + json.dumps({
                                 'slide_count': len(deck['slides']),
-                                'image_assets': len(deck['assets']),
                                 'pptx_bytes': len(pptx_bytes),
                             }, ensure_ascii=False))
                         resp = json.dumps({
@@ -1114,7 +1217,7 @@ def make_handler():
                             'slides': deck['slides'],
                             'debug': deck.get('debug') if body.get('debug') else None,
                         }, ensure_ascii=False)
-                        print('[PPT API] built verified PPT:', deck['title'], len(deck['slides']))
+                        print('[PPT API] official PPT exported:', deck['title'], len(deck['slides']))
                 elif doc_type == 'ppt-research':
                     api_key = os.environ.get('AI_API_KEY', '').strip()
                     if not api_key:
