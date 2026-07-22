@@ -1,0 +1,9 @@
+# Railway needs both runtimes: Python hosts all existing APIs, and Node renders
+# editable PPTX files with PptxGenJS.
+providers = ["python", "node"]
+
+[phases.install]
+cmds = ["pip install -r requirements.txt", "npm ci --omit=dev"]
+
+[start]
+cmd = "python ppt_api.py"

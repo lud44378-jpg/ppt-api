@@ -1,0 +1,12 @@
+{
+  "name": "shizhui-ai-ppt-renderer",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Native, editable PowerPoint renderer for 师助AI",
+  "engines": {
+    "node": "20.x"
+  },
+  "dependencies": {
+    "pptxgenjs": "^4.0.1"
+  }
+}

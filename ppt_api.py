@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """师助AI - PPT生成 API (部署到 Railway / Render)"""
-import os, json, io, base64, http.server, uuid, tempfile, urllib.request, urllib.error, urllib.parse
+import os, json, io, base64, http.server, uuid, tempfile, urllib.request, urllib.error, urllib.parse, textwrap, subprocess
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
@@ -8,7 +8,7 @@ from pptx.enum.text import PP_ALIGN
 from pptx.enum.shapes import MSO_SHAPE
 
 DL_DIR = tempfile.mkdtemp(prefix="seat_dl_")
-PPT_PIPELINE_VERSION = 'official-ppt-v1'
+PPT_PIPELINE_VERSION = 'native-pptxgen-v1'
 
 THEME = {
     'exam':    ('#1A237E', '#2B579A', '#E53935', '#E8EAF6'),
@@ -789,6 +789,611 @@ def gen(data):
     prs.save(buf)
     return buf.getvalue()
 
+###############################################################################
+# PPT generation v1 — MiMo research agent + deterministic presentation engine
+#
+# The previous Qwen storyboard / official-PPT fallback / local renderer chain is
+# intentionally no longer called.  It mixed three incompatible decisions and
+# silently produced a local deck whenever the paid service was unavailable.
+# The functions below keep one owner for content (MiMo) and one owner for
+# rendering (this service), with a visible research and revision loop.
+###############################################################################
+
+def _extract_json_object(raw, label='模型'):
+    """Accept JSON returned with an occasional Markdown fence, but nothing else."""
+    import re
+    raw = str(raw or '').strip()
+    raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=re.I)
+    first = raw.find('{')
+    last = raw.rfind('}')
+    if first < 0 or last <= first:
+        raise RuntimeError(label + '没有返回可读取的结构化方案')
+    try:
+        return json.loads(raw[first:last + 1])
+    except ValueError as exc:
+        raise RuntimeError(label + '返回的方案格式损坏，请重试') from exc
+
+
+def _mimo_key():
+    key = os.environ.get('MIMO_API_KEY', '').strip()
+    if not key:
+        raise RuntimeError('PPT 新引擎未配置：请在 Railway Variables 添加 MIMO_API_KEY。不会再降级为旧版本地 PPT。')
+    return key
+
+
+def _mimo_chat(messages, *, web=False, temperature=0.55, timeout=100):
+    """One MiMo turn.  Web search is a model tool, not fabricated source text."""
+    payload = {
+        'model': os.environ.get('MIMO_MODEL', 'mimo-v2.5').strip() or 'mimo-v2.5',
+        'messages': messages,
+        'temperature': temperature,
+        'max_completion_tokens': 12000,
+        'stream': False,
+    }
+    if web:
+        # MiMo's Chat Completions API exposes this built-in tool.  Search results
+        # are returned as response annotations and are collected below.
+        payload['tools'] = [{'type': 'web_search'}]
+    req = urllib.request.Request(
+        'https://api.xiaomimimo.com/v1/chat/completions',
+        data=json.dumps(payload).encode('utf-8'),
+        headers={'api-key': _mimo_key(), 'Content-Type': 'application/json'},
+    )
+    try:
+        result = json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode('utf-8'))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode('utf-8', errors='ignore')[:500]
+        raise RuntimeError('MiMo 请求失败（HTTP %s）：%s' % (exc.code, detail or exc.reason)) from exc
+    choice = (result.get('choices') or [{}])[0]
+    message = choice.get('message') or {}
+    content = message.get('content') or ''
+    if isinstance(content, list):
+        content = ''.join(x.get('text', '') if isinstance(x, dict) else str(x) for x in content)
+    if not str(content).strip():
+        raise RuntimeError('MiMo 未返回内容')
+    sources, seen = [], set()
+    for annotation in message.get('annotations') or []:
+        if not isinstance(annotation, dict):
+            continue
+        url = str(annotation.get('url') or annotation.get('url_citation', {}).get('url') or '').strip()
+        title = str(annotation.get('title') or annotation.get('url_citation', {}).get('title') or '').strip()
+        if url.startswith(('https://', 'http://')) and url not in seen:
+            seen.add(url)
+            sources.append({'title': title or urllib.parse.urlparse(url).netloc, 'url': url})
+    return str(content).strip(), sources
+
+
+def _detail_pages(detail):
+    return {'短': '5–7', '中': '8–12', '长': '12–18'}.get(str(detail), '8–12')
+
+
+def _deck_diagnostics(slides):
+    warnings, titles = [], set()
+    for index, slide in enumerate(slides, 1):
+        title = str(slide.get('title') or '').strip()
+        blocks = slide.get('blocks') or []
+        chars = sum(len(str(x)) for x in blocks)
+        if not title:
+            warnings.append('第%d页没有标题' % index)
+        if title in titles:
+            warnings.append('第%d页标题重复：%s' % (index, title))
+        titles.add(title)
+        if len(title) > 32:
+            warnings.append('第%d页标题过长（%d字）' % (index, len(title)))
+        if chars > 620:
+            warnings.append('第%d页正文过长（%d字），可能超框' % (index, chars))
+        if not blocks:
+            warnings.append('第%d页没有正文' % index)
+    return warnings
+
+
+def _normalise_agent_slides(plan):
+    allowed = {'opening', 'narrative', 'explain', 'cards', 'timeline', 'scenario', 'activity', 'action', 'closing'}
+    clean = []
+    for item in plan.get('slides', []) if isinstance(plan, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get('title') or '').strip()[:40]
+        blocks = item.get('blocks') or item.get('content') or []
+        if isinstance(blocks, str):
+            blocks = [blocks]
+        blocks = [str(x).strip() for x in blocks if str(x).strip()]
+        if not title or not blocks:
+            continue
+        kind = str(item.get('layout') or item.get('type') or 'explain').lower()
+        clean.append({
+            'title': title,
+            'layout': kind if kind in allowed else 'explain',
+            'blocks': blocks[:7],
+            'visual_query': str(item.get('visual_query') or '').strip()[:140],
+            'speaker_note': str(item.get('speaker_note') or '').strip()[:500],
+        })
+    if len(clean) < 3:
+        raise RuntimeError('MiMo 没有生成足够的页面，已停止导出')
+    return clean
+
+
+def _research_prompt(topic, grade, subject, extra, detail):
+    audience = '中国中小学生'
+    if grade:
+        audience = grade + '学生'
+    subject_hint = ('；学科/场景：' + subject) if subject else ''
+    return '''你是资深中国教师与演示设计师。请先联网检索，再为“%s”设计一份真正可上课的 PPT。
+
+对象：%s%s。教师补充：%s。目标篇幅：%s 页内容页，可由主题复杂度自然增减，不要为了凑页机械拆分。
+
+先在心中完成研究与教学判断，再只输出一个 JSON 对象：
+{"deck_title":"...","subtitle":"...","slides":[{"title":"...","layout":"opening|narrative|explain|cards|timeline|scenario|activity|action|closing","blocks":["..."],"visual_query":"适合真实图片搜索的具体中文词；不需要则空字符串","speaker_note":"教师讲述/追问提示"}]}
+
+硬要求：
+1. 必须联网，优先读取权威原始材料、专业机构资料、论文或正规新闻；检索只用于事实、数据、案例、图像线索，不能把搜索摘要拼成课件。
+2. 用你的学科与教学知识组织内容。每页都要承担不同的教学作用：引入、解释、辨析、案例、活动、方法、迁移、收束可按需要选用，不能套固定八页模板。
+3. 可以写完整、有节奏的段落，不要把所有内容压成口号；也不能把一句话拆成一页。每页文字须适合 16:9 投影展示。
+4. 未被可靠来源支持时，不写精确数字、具体新闻细节、法规条款或研究结论；不要虚构教师、学校、学生或采访。
+5. visual_query 只能用于真正能帮助理解的页面，写“真实照片/现场图/示意图”的检索词；禁止要求图片内含文字、海报、编号或水印。
+6. 不要在正文中塞 URL、参考文献或“据搜索结果”。来源由系统在最后统一列出。''' % (topic, audience, subject_hint, extra or '无', _detail_pages(detail))
+
+
+def build_agent_deck(body):
+    """Research → content plan → machine-readable QA → revision. No old fallback."""
+    topic = str(body.get('topic') or body.get('title') or '').strip()
+    if not topic:
+        raise RuntimeError('PPT主题不能为空')
+    detail = str(body.get('detail') or body.get('wordCount') or '中')
+    grade = str(body.get('grade') or '').strip()
+    subject = str(body.get('subject') or '').strip()
+    extra = str(body.get('userDetail') or body.get('harvest') or '').strip()[:1600]
+    trace = bool(body.get('debug'))
+    print('[PPT AGENT] 01 research-and-plan topic=%s detail=%s' % (topic, detail))
+    raw, sources = _mimo_chat([
+        {'role': 'system', 'content': '你产出的是给教师直接使用的演示方案。宁可少写未经证实的事实，也不要编造。'},
+        {'role': 'user', 'content': _research_prompt(topic, grade, subject, extra, detail)},
+    ], web=True, temperature=0.7, timeout=115)
+    if len(sources) < 2:
+        raise RuntimeError('联网搜索未返回至少 2 个可追溯来源；为避免假资料，已停止生成')
+    initial = _normalise_agent_slides(_extract_json_object(raw, 'MiMo'))
+    diagnostics = _deck_diagnostics(initial)
+    print('[PPT AGENT] 02 research sources=%d, initial slides=%d, diagnostics=%s' % (
+        len(sources), len(initial), '；'.join(diagnostics) if diagnostics else '通过'))
+    revision_prompt = '''下面是一份已经完成联网研究的教师 PPT 草案。请作为苛刻的教研员和演示设计师修订它。
+主题：%s
+对象：%s
+机器检测：%s
+
+只输出与原结构完全相同的 JSON 对象。保留有价值的完整表述；删掉空话、重复、没有依据的精确事实；必要时合并或拆分页面。确保每页在投影上能读完，并让版式类型有节奏变化。不要新编来源、案例或数据。\n\n草案：%s''' % (
+        topic, grade or '中小学生', '；'.join(diagnostics) or '无明显结构问题',
+        json.dumps({'deck_title': topic, 'slides': initial}, ensure_ascii=False))
+    revised_raw, _ = _mimo_chat([
+        {'role': 'system', 'content': '只返回 JSON，不写解释。'},
+        {'role': 'user', 'content': revision_prompt},
+    ], web=False, temperature=0.35, timeout=100)
+    revised = _extract_json_object(revised_raw, 'MiMo修订')
+    slides = _normalise_agent_slides(revised)
+    final_diagnostics = _deck_diagnostics(slides)
+    print('[PPT AGENT] 03 revision slides=%d, diagnostics=%s' % (
+        len(slides), '；'.join(final_diagnostics) if final_diagnostics else '通过'))
+    deck = {
+        'title': str(revised.get('deck_title') or topic).strip()[:60],
+        'subtitle': str(revised.get('subtitle') or '').strip()[:100],
+        'theme': detect(topic),
+        'slides': slides,
+        'sources': sources[:8],
+        'debug': ({'research_sources': sources, 'initial_plan': initial, 'initial_diagnostics': diagnostics,
+                   'revised_plan': slides, 'final_diagnostics': final_diagnostics} if trace else None),
+    }
+    return deck
+
+
+def build_agent_research(topic, detail='中'):
+    """PPT research endpoint uses the same research engine and source guarantee."""
+    raw, sources = _mimo_chat([
+        {'role': 'system', 'content': '你是严谨的中国教师备课研究员。'},
+        {'role': 'user', 'content': '请联网检索“%s”的课堂资料。只写可验证事实、可用案例方向和教学建议；标出不宜当作事实使用的内容。篇幅：%s。' % (topic, detail)},
+    ], web=True, temperature=0.25, timeout=90)
+    if len(sources) < 2:
+        raise RuntimeError('联网搜索没有返回足够可核验来源')
+    return {'research_note': raw[:5000], 'sources': sources[:8], 'assets': []}
+
+
+def _safe_download_image(url):
+    request = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (compatible; ShizhuAI/1.0)'})
+    with urllib.request.urlopen(request, timeout=18) as response:
+        blob = response.read(8 * 1024 * 1024 + 1)
+        content_type = response.headers.get_content_type()
+    if len(blob) > 8 * 1024 * 1024:
+        raise RuntimeError('图片过大')
+    if not content_type.startswith('image/'):
+        raise RuntimeError('链接不是图片')
+    suffix = '.png' if 'png' in content_type else '.jpg'
+    path = os.path.join(tempfile.mkdtemp(prefix='ppt_visual_'), 'asset' + suffix)
+    with open(path, 'wb') as fh:
+        fh.write(blob)
+    return path
+
+
+def _attach_research_visuals(deck, max_images=4):
+    """Every planned visual gets one attempt. Failed external downloads never invent AI art."""
+    image_key = os.environ.get('AI_API_KEY', '').strip()
+    if not image_key:
+        print('[PPT AGENT] 04 visual search skipped: AI_API_KEY unavailable')
+        return
+    completed = 0
+    for index, slide in enumerate(deck['slides'], 1):
+        if completed >= max_images:
+            break
+        query = slide.get('visual_query', '')
+        if not query:
+            continue
+        try:
+            url = search_image_url(query, image_key, timeout=20)
+            slide['_image_path'] = _safe_download_image(url)
+            completed += 1
+            print('[PPT AGENT] 04 visual %d attached: %s' % (index, query))
+        except Exception as exc:
+            print('[PPT AGENT] 04 visual %d skipped: %s' % (index, str(exc)[:160]))
+    print('[PPT AGENT] 04 visuals complete=%d' % completed)
+
+
+def _add_textbox(slide, x, y, w, h, text, size, color, *, bold=False, align=PP_ALIGN.LEFT):
+    box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
+    frame = box.text_frame
+    frame.word_wrap = True
+    frame.margin_left = Pt(4); frame.margin_right = Pt(4)
+    para = frame.paragraphs[0]
+    para.text = str(text)
+    para.font.size = Pt(size); para.font.color.rgb = color; para.font.bold = bold; para.alignment = align
+    return box
+
+
+def _add_card(slide, x, y, w, h, text, fill, color, size=17):
+    card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(w), Inches(h))
+    card.fill.solid(); card.fill.fore_color.rgb = fill; card.line.fill.background()
+    frame = card.text_frame; frame.word_wrap = True
+    frame.margin_left = Pt(12); frame.margin_right = Pt(12); frame.margin_top = Pt(8)
+    p = frame.paragraphs[0]; p.text = str(text); p.font.size = Pt(size); p.font.color.rgb = color
+    return card
+
+
+def render_agent_deck(deck):
+    """A small deliberate design system. Content controls layout; renderer controls overflow."""
+    _attach_research_visuals(deck)
+    theme = THEME.get(deck.get('theme'), THEME['default'])
+    dark, primary, accent, light = [rgb(x) for x in theme]
+    white, text = RGBColor(255, 255, 255), RGBColor(45, 50, 60)
+    prs = Presentation(); prs.slide_width = Inches(13.333); prs.slide_height = Inches(7.5)
+
+    all_slides = [{'title': deck['title'], 'layout': 'cover', 'blocks': [deck.get('subtitle', '')]}] + deck['slides']
+    all_slides.append({'title': '资料来源与延伸阅读', 'layout': 'sources', 'blocks': deck.get('sources', [])})
+    all_slides.append({'title': '谢谢聆听', 'layout': 'end', 'blocks': []})
+
+    for index, item in enumerate(all_slides):
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        kind = item.get('layout', 'explain')
+        blocks = item.get('blocks') or []
+        if kind == 'cover':
+            slide.background.fill.solid(); slide.background.fill.fore_color.rgb = dark
+            bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(.9), Inches(1.1), Inches(.14), Inches(4.9))
+            bar.fill.solid(); bar.fill.fore_color.rgb = accent; bar.line.fill.background()
+            _add_textbox(slide, 1.35, 2.1, 10.5, 1.6, item['title'], 42, white, bold=True)
+            if blocks and blocks[0]:
+                _add_textbox(slide, 1.4, 4.0, 9.8, .7, blocks[0], 20, light)
+            continue
+        if kind == 'end':
+            slide.background.fill.solid(); slide.background.fill.fore_color.rgb = light
+            _add_textbox(slide, 1.2, 2.7, 10.9, 1, item['title'], 40, dark, bold=True, align=PP_ALIGN.CENTER)
+            continue
+        # Header and page marker for every work page.
+        _add_textbox(slide, .8, .45, 11.5, .65, item['title'], 29, dark, bold=True)
+        line = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(.82), Inches(1.2), Inches(1.15), Pt(4))
+        line.fill.solid(); line.fill.fore_color.rgb = accent; line.line.fill.background()
+        _add_textbox(slide, 11.85, 6.92, .65, .25, '%d/%d' % (index + 1, len(all_slides)), 9, primary, align=PP_ALIGN.RIGHT)
+
+        if kind == 'sources':
+            y = 1.65
+            for source in blocks[:8]:
+                domain = urllib.parse.urlparse(source.get('url', '')).netloc
+                _add_card(slide, 1.0, y, 11.1, .52, '%s  ·  %s' % (source.get('title', domain), domain), light, text, 13)
+                y += .62
+            continue
+
+        image_path = item.get('_image_path')
+        if kind in ('narrative', 'scenario', 'opening'):
+            x, w = (5.15, 6.75) if image_path else (1.05, 11.1)
+            panel = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(1.6), Inches(w), Inches(4.8))
+            panel.fill.solid(); panel.fill.fore_color.rgb = light; panel.line.fill.background()
+            joined = '\n\n'.join(blocks[:2])
+            font = 20 if len(joined) < 280 else 17 if len(joined) < 430 else 15
+            _add_textbox(slide, x + .25, 1.9, w - .5, 4.15, joined, font, text)
+            if image_path:
+                slide.shapes.add_picture(image_path, Inches(1.0), Inches(1.75), Inches(3.7), Inches(3.7))
+            continue
+
+        if kind in ('cards', 'action', 'activity', 'timeline'):
+            count = min(max(len(blocks), 1), 6)
+            cols = 3 if count > 4 else 2 if count > 1 else 1
+            rows = (count + cols - 1) // cols
+            card_w = 11.25 / cols - .16
+            card_h = min(2.15, 4.75 / rows)
+            for pos, block in enumerate(blocks[:6]):
+                col, row = pos % cols, pos // cols
+                x, y = 1.0 + col * (11.25 / cols), 1.6 + row * (4.85 / rows)
+                _add_card(slide, x, y, card_w, card_h, block, light, text, 16 if len(block) < 85 else 14)
+                dot = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(x + .16), Inches(y + .17), Inches(.28), Inches(.28))
+                dot.fill.solid(); dot.fill.fore_color.rgb = accent; dot.line.fill.background()
+            continue
+
+        # Explain is intentionally dense enough for real teaching, but resizes
+        # before overflow rather than forcing arbitrary page splits.
+        x, w = (1.0, 6.7) if image_path else (1.0, 11.25)
+        y = 1.55
+        for block in blocks[:6]:
+            height = .72 if len(block) < 75 else 1.02 if len(block) < 150 else 1.32
+            _add_card(slide, x, y, w, height, block, light, text, 16 if len(block) < 140 else 14)
+            y += height + .18
+            if y > 6.3:
+                break
+        if image_path:
+            slide.shapes.add_picture(image_path, Inches(8.1), Inches(1.8), Inches(3.55), Inches(3.55))
+
+    output = io.BytesIO(); prs.save(output)
+    print('[PPT AGENT] 05 rendered slides=%d bytes=%d' % (len(all_slides), output.tell()))
+    return output.getvalue()
+
+
+def _hex_color(value, fallback):
+    value = str(value or '').strip()
+    if len(value) == 7 and value.startswith('#'):
+        try:
+            return rgb(value)
+        except ValueError:
+            pass
+    return fallback
+
+
+def _freeform_prompt(topic, grade, subject, extra):
+    audience = (grade + '学生') if grade else '中小学生'
+    subject_line = ('；相关学科：' + subject) if subject else ''
+    return '''你是一位有经验的中国中小学教师，也是一位优秀的演示设计师。请为教师直接生成一份可使用的 PPT，可以是课堂教学课件、主题班会、家长会、工作汇报或其他教育教学场景。根据主题自主联网查阅资料，并结合你的知识完成内容与视觉设计。
+
+主题：%s
+对象：%s%s
+教师补充：%s
+
+请使用你自己的判断决定页数、结构、文字篇幅、讲述顺序和每一页的视觉设计。让内容真正适合课堂或班会使用、好讲也好懂。需要图片时，写出合适的真实图片搜索词。
+
+只输出一个 JSON 对象，不要 Markdown 或解释。它是 13.333×7.5 英寸画布的自由演示设计：
+{
+ "title":"总标题",
+ "slides":[
+   {"background":"#FFFFFF", "elements":[
+      {"kind":"shape","shape":"rect|round_rect|line|ellipse","x":0,"y":0,"w":13.333,"h":7.5,"fill":"#FFFFFF","line":"#FFFFFF"},
+      {"kind":"text","x":1,"y":1,"w":8,"h":1,"text":"文字","font_size":28,"color":"#1F2937","bold":true,"align":"left|center|right"},
+      {"kind":"image","x":8,"y":1.5,"w":4,"h":3,"query":"适合检索真实图片的中文词"}
+   ]}
+ ]
+}
+坐标和尺寸直接使用英寸。先放背景/形状，再放文字和图片；图片元素按页面需要添加。''' % (topic, audience, subject_line, extra or '无')
+
+
+def _normalise_freeform_deck(plan):
+    if not isinstance(plan, dict) or not isinstance(plan.get('slides'), list):
+        raise RuntimeError('MiMo 没有返回 PPT 页面')
+    slides = []
+    for raw_slide in plan['slides'][:30]:
+        if not isinstance(raw_slide, dict):
+            continue
+        elements = []
+        for raw in raw_slide.get('elements', [])[:45]:
+            if not isinstance(raw, dict):
+                continue
+            kind = str(raw.get('kind') or '').lower()
+            if kind not in {'text', 'shape', 'image'}:
+                continue
+            try:
+                x, y = float(raw.get('x', 0)), float(raw.get('y', 0))
+                w, h = float(raw.get('w', 1)), float(raw.get('h', 1))
+            except (TypeError, ValueError):
+                continue
+            # This only keeps elements on the physical slide; it does not choose
+            # their layout or rewrite their content.
+            x, y = max(0, min(x, 13.2)), max(0, min(y, 7.4))
+            w, h = max(.08, min(w, 13.333 - x)), max(.08, min(h, 7.5 - y))
+            item = {'kind': kind, 'x': x, 'y': y, 'w': w, 'h': h}
+            if kind == 'text':
+                text_value = str(raw.get('text') or '').strip()
+                if not text_value:
+                    continue
+                item.update({'text': text_value, 'font_size': max(8, min(float(raw.get('font_size', 18)), 52)),
+                             'color': str(raw.get('color') or '#1F2937'), 'bold': bool(raw.get('bold')),
+                             'align': str(raw.get('align') or 'left').lower()})
+            elif kind == 'shape':
+                item.update({'shape': str(raw.get('shape') or 'rect').lower(),
+                             'fill': str(raw.get('fill') or '#FFFFFF'), 'line': str(raw.get('line') or raw.get('fill') or '#FFFFFF')})
+            else:
+                query = str(raw.get('query') or '').strip()
+                if not query:
+                    continue
+                item['query'] = query[:180]
+            elements.append(item)
+        if elements:
+            slides.append({'background': str(raw_slide.get('background') or '#FFFFFF'), 'elements': elements})
+    if len(slides) < 2:
+        raise RuntimeError('MiMo 未生成足够页面')
+    return {'title': str(plan.get('title') or '').strip()[:80], 'slides': slides}
+
+
+def build_freeform_deck(body):
+    topic = str(body.get('topic') or body.get('title') or '').strip()
+    if not topic:
+        raise RuntimeError('PPT主题不能为空')
+    print('[PPT FREEFORM] 01 research-and-design topic=%s' % topic)
+    raw, sources = _mimo_chat([
+        {'role': 'system', 'content': '你要自由设计一份可直接使用的中小学教师 PPT。'},
+        {'role': 'user', 'content': _freeform_prompt(topic, str(body.get('grade') or '').strip(),
+                                                       str(body.get('subject') or '').strip(),
+                                                       str(body.get('userDetail') or body.get('harvest') or '').strip()[:1600])},
+    ], web=True, temperature=0.72, timeout=140)
+    deck = _normalise_freeform_deck(_extract_json_object(raw, 'MiMo'))
+    if not deck['title']:
+        deck['title'] = topic
+    deck['sources'] = sources[:10]
+    deck['debug'] = {'research_sources': sources, 'design': deck} if body.get('debug') else None
+    print('[PPT FREEFORM] 02 sources=%d slides=%d' % (len(sources), len(deck['slides'])))
+    return deck
+
+
+def render_freeform_deck(deck):
+    """Render the model's free canvas. No fixed page count, outline, or layout."""
+    prs = Presentation(); prs.slide_width = Inches(13.333); prs.slide_height = Inches(7.5)
+    default_text = RGBColor(31, 41, 55)
+    for page_number, spec in enumerate(deck['slides'], 1):
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        slide.background.fill.solid(); slide.background.fill.fore_color.rgb = _hex_color(spec.get('background'), RGBColor(255, 255, 255))
+        for element in spec['elements']:
+            x, y, w, h = (Inches(element['x']), Inches(element['y']), Inches(element['w']), Inches(element['h']))
+            if element['kind'] == 'shape':
+                shape_map = {'round_rect': MSO_SHAPE.ROUNDED_RECTANGLE, 'ellipse': MSO_SHAPE.OVAL,
+                             'line': MSO_SHAPE.RECTANGLE, 'rect': MSO_SHAPE.RECTANGLE}
+                shape = slide.shapes.add_shape(shape_map.get(element.get('shape'), MSO_SHAPE.RECTANGLE), x, y, w, h)
+                shape.fill.solid(); shape.fill.fore_color.rgb = _hex_color(element.get('fill'), RGBColor(255, 255, 255))
+                shape.line.color.rgb = _hex_color(element.get('line'), RGBColor(255, 255, 255))
+            elif element['kind'] == 'text':
+                align_map = {'center': PP_ALIGN.CENTER, 'right': PP_ALIGN.RIGHT, 'left': PP_ALIGN.LEFT}
+                _add_textbox(slide, element['x'], element['y'], element['w'], element['h'], element['text'],
+                             element['font_size'], _hex_color(element.get('color'), default_text),
+                             bold=element.get('bold', False), align=align_map.get(element.get('align'), PP_ALIGN.LEFT))
+            elif element['kind'] == 'image':
+                # The deck remains usable if a legitimate public image cannot be retrieved.
+                key = os.environ.get('AI_API_KEY', '').strip()
+                if not key:
+                    continue
+                try:
+                    image_url = search_image_url(element['query'], key, timeout=20)
+                    slide.shapes.add_picture(_safe_download_image(image_url), x, y, w, h)
+                    print('[PPT FREEFORM] image attached page=%d query=%s' % (page_number, element['query']))
+                except Exception as exc:
+                    print('[PPT FREEFORM] image skipped page=%d: %s' % (page_number, str(exc)[:160]))
+    output = io.BytesIO(); prs.save(output)
+    print('[PPT FREEFORM] 03 exported slides=%d bytes=%d' % (len(deck['slides']), output.tell()))
+    return output.getvalue()
+
+
+def _native_ppt_prompt(topic, grade, subject, extra, detail):
+    """A constrained story-board is more reliable than asking a model for coordinates."""
+    audience = (grade + '学生') if grade else '中小学生'
+    subject_line = ('；相关学科：' + subject) if subject else ''
+    pages = {'短': '5-6', '中': '7-9', '长': '10-12'}.get(str(detail), '7-9')
+    return '''你是一位中国中小学教师和专业演示设计师。请先联网核实需要核实的事实，再为主题设计一份能直接用于课堂、班会或家长会的 PPT 故事板。
+
+主题：%s
+对象：%s%s
+教师补充：%s
+内容页目标：%s 页。封面、资料来源、结束页由程序生成，不要输出。
+
+只输出一个合法 JSON 对象，不要 Markdown 或解释：
+{"title":"总标题","subtitle":"简短副标题","slides":[{"title":"页面标题","layout":"story|explain|cards|steps|timeline|compare|scenario|action","blocks":["投影上可读的完整文字"],"visual_query":"需要真实配图时填写具体中文检索词，否则为空字符串","speaker_note":"给教师的讲述或追问提示"}]}
+
+硬性质量标准：
+1. 每页只解决一个教学问题，结构随主题自然推进，不套固定八页模板；整套至少使用 4 种不同 layout。
+2. story/scenario 可用 1-2 段完整、通顺的文字；explain 用 2-5 条有解释力的要点；cards/action 用 2-6 条可执行内容；steps/timeline 用 3-5 步；compare 的 blocks 前半为左侧、后半为右侧。不要把同一句话拆成续页。
+3. 事实、数据、政策、真实事件必须经联网资料支撑；不确定时使用课堂情境或条件表达，绝不虚构学校、学生、采访或来源。
+4. 不要在 blocks 中放 URL、参考文献、页码、项目符号、编号或“资料显示”；来源由系统统一生成。
+5. visual_query 仅在一张真实图片明显帮助理解时填写，描述具体、无文字、无水印的真实照片或示意图。每页至多一张图，整套不必强行配图。
+6. 语言符合 %s 的理解水平，少用口号，多给解释、判断方法、可讨论的情境或可落实的行动。''' % (topic, audience, subject_line, extra or '无', pages, audience)
+
+
+def _normalise_native_deck(plan, topic, detail):
+    """Validate model output before it reaches the editable native renderer."""
+    if not isinstance(plan, dict) or not isinstance(plan.get('slides'), list):
+        raise RuntimeError('PPT方案没有返回页面结构')
+    allowed = {'story', 'explain', 'cards', 'steps', 'timeline', 'compare', 'scenario', 'action'}
+    max_pages = {'短': 6, '中': 9, '长': 12}.get(str(detail), 9)
+    slides = []
+    for raw in plan['slides'][:max_pages]:
+        if not isinstance(raw, dict):
+            continue
+        title = str(raw.get('title') or '').strip()[:40]
+        blocks = raw.get('blocks') or raw.get('content') or []
+        if isinstance(blocks, str):
+            blocks = [blocks]
+        blocks = [str(item).strip()[:260] for item in blocks if str(item).strip()]
+        if not title or not blocks:
+            continue
+        layout = str(raw.get('layout') or raw.get('type') or 'explain').lower()
+        slides.append({
+            'title': title,
+            'layout': layout if layout in allowed else 'explain',
+            'blocks': blocks[:6],
+            'visual_query': str(raw.get('visual_query') or '').strip()[:140],
+            'speaker_note': str(raw.get('speaker_note') or '').strip()[:700],
+        })
+    if len(slides) < 3:
+        raise RuntimeError('PPT内容页不足，未导出')
+    # A repeated layout is permissible for short decks, but not a whole deck.
+    layouts = {slide['layout'] for slide in slides}
+    if len(slides) >= 5 and len(layouts) < 3:
+        raise RuntimeError('PPT版式变化不足，已停止导出以避免生成模板化页面')
+    return {
+        'title': str(plan.get('title') or topic).strip()[:60] or topic,
+        'subtitle': str(plan.get('subtitle') or '').strip()[:100],
+        'slides': slides,
+    }
+
+
+def build_native_deck(body):
+    """Research and write a bounded teaching storyboard for the native renderer."""
+    topic = str(body.get('topic') or body.get('title') or '').strip()
+    if not topic:
+        raise RuntimeError('PPT主题不能为空')
+    detail = str(body.get('detail') or body.get('wordCount') or '中')
+    grade = str(body.get('grade') or '').strip()
+    subject = str(body.get('subject') or '').strip()
+    extra = str(body.get('userDetail') or body.get('harvest') or '').strip()[:1600]
+    print('[PPT NATIVE] 01 research-and-storyboard topic=%s detail=%s' % (topic, detail))
+    raw, sources = _mimo_chat([
+        {'role': 'system', 'content': '你是严谨的中国教育工作者。只输出用户请求的 JSON。'},
+        {'role': 'user', 'content': _native_ppt_prompt(topic, grade, subject, extra, detail)},
+    ], web=True, temperature=0.48, timeout=135)
+    deck = _normalise_native_deck(_extract_json_object(raw, 'MiMo'), topic, detail)
+    deck['theme'] = str(body.get('theme') or detect(topic))
+    deck['sources'] = sources[:6]
+    if body.get('debug'):
+        deck['debug'] = {'research_sources': sources, 'storyboard': deck['slides']}
+    print('[PPT NATIVE] 02 sources=%d slides=%d layouts=%s' % (
+        len(sources), len(deck['slides']), ','.join(sorted({s['layout'] for s in deck['slides']}))))
+    return deck
+
+
+def render_native_deck(deck):
+    """Use PptxGenJS so all text, shapes and images remain editable in PowerPoint."""
+    _attach_research_visuals(deck, max_images=4)
+    renderer = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ppt_native_renderer.js')
+    if not os.path.isfile(renderer):
+        raise RuntimeError('原生PPT渲染器文件缺失')
+    workdir = tempfile.mkdtemp(prefix='native_ppt_')
+    input_path = os.path.join(workdir, 'deck.json')
+    output_path = os.path.join(workdir, 'deck.pptx')
+    with open(input_path, 'w', encoding='utf-8') as fh:
+        json.dump(deck, fh, ensure_ascii=False)
+    try:
+        completed = subprocess.run(
+            ['node', renderer, input_path, output_path],
+            capture_output=True, text=True, timeout=90, check=False,
+        )
+    except FileNotFoundError as err:
+        raise RuntimeError('服务器未安装 Node.js，无法生成原生可编辑 PPT') from err
+    except subprocess.TimeoutExpired as err:
+        raise RuntimeError('原生PPT排版超时') from err
+    if completed.returncode != 0:
+        raise RuntimeError('原生PPT渲染失败：' + (completed.stderr or completed.stdout or '未知错误')[:500])
+    if not os.path.isfile(output_path) or os.path.getsize(output_path) < 5000:
+        raise RuntimeError('原生PPT导出文件异常')
+    with open(output_path, 'rb') as fh:
+        result = fh.read()
+    print('[PPT NATIVE] 03 rendered bytes=%d' % len(result))
+    return result
+
+
 def gen_docx(data):
     """生成Word文档(python-docx)，带【】小标题识别、字体、字号、缩进"""
     from docx import Document
@@ -1195,18 +1800,17 @@ def make_handler():
                         except Exception as e:
                             resp = json.dumps({'code': -1, 'error': '搜索失败: ' + str(e)[:200]})
                 elif doc_type == 'ppt-build':
-                    api_key = os.environ.get('AI_API_KEY', '').strip()
-                    if not api_key:
-                        resp = json.dumps({'code': -1, 'error': 'PPT生成未配置 AI_API_KEY'})
-                    else:
-                        # PPT 主链路改用阿里官方全云端服务；本服务只生成教学大纲并转发导出文件。
-                        pptx_bytes, deck = build_official_ppt(body, api_key)
+                    try:
+                        deck = build_native_deck(body)
+                        pptx_bytes = render_native_deck(deck)
+                        result_label = 'native-pptxgen'
                         fid = str(uuid.uuid4())
                         fpath = os.path.join(DL_DIR, fid + '.pptx')
                         with open(fpath, 'wb') as fh:
                             fh.write(pptx_bytes)
                         if body.get('debug'):
-                            print('[PPT TRACE] 10_official_result: ' + json.dumps({
+                            print('[PPT TRACE] 10_ppt_result: ' + json.dumps({
+                                'engine': result_label,
                                 'slide_count': len(deck['slides']),
                                 'pptx_bytes': len(pptx_bytes),
                             }, ensure_ascii=False))
@@ -1217,17 +1821,16 @@ def make_handler():
                             'slides': deck['slides'],
                             'debug': deck.get('debug') if body.get('debug') else None,
                         }, ensure_ascii=False)
-                        print('[PPT API] official PPT exported:', deck['title'], len(deck['slides']))
+                        print('[PPT API] ' + result_label + ' PPT exported:', deck['title'], len(deck['slides']))
+                    except Exception as exc:
+                        print('[PPT AGENT] failed:', repr(exc))
+                        resp = json.dumps({'code': -1, 'error': str(exc)[:600]}, ensure_ascii=False)
                 elif doc_type == 'ppt-research':
-                    api_key = os.environ.get('AI_API_KEY', '').strip()
-                    if not api_key:
-                        resp = json.dumps({'code': -1, 'error': 'PPT联网研究未配置（需在Railway设置 AI_API_KEY）'})
-                    else:
-                        try:
-                            pack = build_ppt_research(body.get('topic', ''), api_key, body.get('detail', '中'))
-                            resp = json.dumps({'code': 0, 'data': pack}, ensure_ascii=False)
-                        except Exception as e:
-                            resp = json.dumps({'code': -1, 'error': 'PPT联网研究失败: ' + str(e)[:200]})
+                    try:
+                        pack = build_agent_research(body.get('topic', ''), body.get('detail', '中'))
+                        resp = json.dumps({'code': 0, 'data': pack}, ensure_ascii=False)
+                    except Exception as e:
+                        resp = json.dumps({'code': -1, 'error': 'PPT联网研究失败: ' + str(e)[:300]}, ensure_ascii=False)
                 elif doc_type == 'vision':
                     api_key = os.environ.get('AI_API_KEY', '').strip()
                     if not api_key:
