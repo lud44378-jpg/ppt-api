@@ -1,0 +1,12 @@
+.git
+.DS_Store
+.api_key
+node_modules
+__pycache__
+*.pyc
+*.pptx
+*.pdf
+*.docx
+*.xlsx
+test_files
+miniprogram
